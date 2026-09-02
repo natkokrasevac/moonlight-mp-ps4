@@ -1,0 +1,15 @@
+# Directories
+_build/
+build/
+_reference/
+_sdk/
+
+# Files
+.DS_Store
+
+# PS4 stage files
+*.gp4
+*.pkg
+eboot.bin
+param.sfo
+

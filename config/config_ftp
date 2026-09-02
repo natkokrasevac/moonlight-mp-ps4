@@ -1,0 +1,4 @@
+# FTP upload configuration
+FTP_HOST    := 10.100.101.69
+FTP_PORT    := 2121
+FTP_PATH    := /data/pkg/
