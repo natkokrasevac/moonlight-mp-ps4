@@ -113,10 +113,11 @@ static constexpr float kFirstFrameDeltaSeconds = 0.0f;
 /// Microseconds per second.
 static constexpr double kUsecPerSec = 1000000.0;
 
-/// Paired-host HTTPS reachability fallback poll interval (microseconds).
-/// This is a low-frequency fallback cadence (~5 s), deliberately much slower
-/// than the 1-second mDNS cadence. It is used only for paired hosts that are
-/// not currently observed via mDNS but have a known persisted endpoint.
+/// Paired-host HTTPS serverinfo poll interval (microseconds).
+/// This is a low-frequency cadence (~5 s), deliberately much slower than the
+/// 1-second mDNS cadence. Paired hosts are probed periodically regardless of
+/// mDNS state so a server-side unpair is detected even while the host is
+/// Online via mDNS and the user is on the Host List.
 static constexpr uint64_t kPairedHostProbeIntervalUs = 5000000ull;
 
 /// App List serverinfo poll interval (microseconds).
@@ -130,12 +131,6 @@ static constexpr uint64_t kAppListPollIntervalUs = 1000000ull;
 /// unreachable IP; a fallback probe must use a short bound so it does not
 /// occupy the ServerInfoManager worker for tens of seconds.
 static constexpr uint32_t kPairedHostProbeTimeoutMs = 1500;
-
-/// mDNS freshness threshold (ms) used to decide whether a host is currently
-/// being observed via mDNS. Mirrors HostManager's kHostStaleAfterMs. A host is
-/// considered "currently observed via mDNS" while its last mDNS observation is
-/// fresher than this; once mDNS stops, the fallback probe becomes eligible.
-static constexpr uint64_t kMdnsFreshAfterMs = 12000;
 
 /// In-stream statistics snapshot refresh interval (microseconds).
 /// The statistics overlay is refreshed at a bounded ~1 Hz cadence; network
@@ -1455,18 +1450,21 @@ void MoonlightApp::processAsyncResults(uint64_t nowMs) {
                 }
 
                 // If this host has local trust (is paired) but the serverinfo
-                // query was sent over plain HTTP (because the serverId was not
-                // yet known at scheduling time), re-query over HTTPS with the
-                // client certificate so the server reports the correct
-                // PairStatus. Sunshine only reports paired=1 when the client
-                // authenticates via HTTPS with its certificate.
+                // query reports the server no longer considers this client
+                // paired, the server has unpaired this client on the server
+                // side. Because buildServerInfoTarget always queries over
+                // HTTPS (with the client certificate) whenever local trust
+                // exists, this result is authoritative — the server genuinely
+                // revoked this client. Unpair the client locally rather than
+                // re-querying (which would loop forever against the same
+                // result).
                 const ml::Host* host = m_hostManager->findHost(siUpdate.hostId);
                 if (host != nullptr &&
                     m_pairingManager &&
                     m_pairingManager->hasLocalTrustForServer(host->serverId) &&
                     !siUpdate.info.serverReportsPaired) {
-                    diagPrint("[app] host has local trust but serverinfo reported unpaired; re-querying over HTTPS");
-                    scheduleServerInfoQuery(siUpdate.hostId);
+                    diagPrint("[app] host unpaired this client on the server side; unpairing locally");
+                    handleServerSideUnpair(siUpdate.hostId);
                 } else {
                     // Reconcile pairing state using local trust + server evidence.
                     reconcileHostPairingState(siUpdate.hostId);
@@ -1679,10 +1677,11 @@ void MoonlightApp::update(float deltaTime) {
     //    *previous* frame's delta (before the timing refresh above).
     (void)deltaTime;
 
-    // 2b. Update the paired-host HTTPS reachability fallback polling cadence.
-    //     This is a low-frequency fallback for paired hosts not observed via
-    //     mDNS. It is centralized here so future suspend handling can disable
-    //     it cleanly.
+    // 2b. Update the paired-host HTTPS serverinfo polling cadence. Paired
+    //     hosts are probed periodically regardless of mDNS state so a
+    //     server-side unpair is detected even while the host is Online via
+    //     mDNS and the user is on the Host List. It is centralized here so
+    //     future suspend handling can disable it cleanly.
     updatePairedHostProbe();
 
     // 2c. Update the App List serverinfo polling cadence. While the App List
@@ -1706,6 +1705,13 @@ void MoonlightApp::update(float deltaTime) {
     // 3a. Emit concise [host-poll] transition diagnostics (Online->Stale,
     //     Stale->Offline) by comparing against the previously tracked state.
     logHostAvailabilityTransitions(m_currTimestamp / 1000);
+
+    // 3b. Centralized App List guard: if the current App List host is no
+    //     longer paired (e.g., the server unpaired this client on the server
+    //     side), back out to the Host List. Runs once per frame so it also
+    //     fires after a stream terminal handler has returned to the App List
+    //     following a server-side unpair during streaming.
+    leaveAppListIfHostUnpaired();
 
     // 4. Supply the current read-only host snapshot to the UI.
     //    Only push to UiManager when the authoritative registry actually
@@ -2008,6 +2014,37 @@ void MoonlightApp::render() {
             } else {
                 // No change: no recompose. prevHelpState stays current.
                 m_prevHelpState = state;
+            }
+
+            // --- Compose the Reset Moonlight confirmation modal ------------
+            // If the Reset Moonlight confirmation dialog is open, compose it
+            // on top of the Help screen. Detect open/close and dirty the
+            // appropriate regions.
+            const bool resetOpen = m_ui->isResetConfirmOpen();
+            if (resetOpen || m_prevResetConfirmOpen) {
+                if (!resetOpen && m_prevResetConfirmOpen) {
+                    // Close transition: restore the underlying Help screen.
+                    const ps4::Rect dim = m_modalRenderer->dimBounds();
+                    m_helpRenderer->renderRegion(state, *m_uiCompositor, dim);
+                    m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
+                    m_prevResetConfirmOpen = false;
+                } else if (resetOpen) {
+                    ui::ModalRenderState modalState;
+                    if (m_ui->buildModalRenderState(modalState)) {
+                        if (!m_prevResetConfirmOpen) {
+                            // Full open: compose the whole modal.
+                            m_modalRenderer->renderFull(modalState, *m_uiCompositor);
+                            m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                        } else if (modalState.yesSelected != m_prevResetModalState.yesSelected) {
+                            // Choice change: dirty the choice button region.
+                            const ps4::Rect choice = m_modalRenderer->choiceBounds(modalState.kind);
+                            m_modalRenderer->renderRegion(modalState, *m_uiCompositor, choice);
+                            m_uiBlitter->addDirtyRect(choice, kWidth, kHeight);
+                        }
+                        m_prevResetConfirmOpen = true;
+                        m_prevResetModalState = modalState;
+                    }
+                }
             }
         }
     } else if (screen == ui::UiScreen::HostList) {
@@ -3203,6 +3240,10 @@ void MoonlightApp::handleUiIntent(const ui::UiIntent& intent) {
             handleDeleteHost(intent.hostId);
         }
         break;
+    case ui::UiIntentType::RequestResetMoonlight:
+        diagPrint("[app] intent: RequestResetMoonlight");
+        handleResetMoonlight();
+        break;
     case ui::UiIntentType::RequestAddHost:
         {
             char buf[128];
@@ -3249,7 +3290,18 @@ void MoonlightApp::handlePairingUpdate(const ml::PairingUpdate& update) {
         view.state = ui::PairingPresentationState::WaitingForUser;
         break;
     case ml::PairingUpdateType::Progress:
-        diagPrint("[app] pairing: progress");
+        {
+            // Log the pairing stage description (statusText) so the klog can
+            // pinpoint exactly which protocol stage the flow is in when it
+            // fails. statusText carries the stage label pushed by the worker
+            // (e.g. "Waiting for PIN entry", "Exchanging challenges...",
+            // "Verifying host identity...", "Completing pairing...",
+            // "Confirming pairing...", "Saving pairing information...").
+            char buf[192];
+            snprintf(buf, sizeof(buf), "[app] pairing: progress (%s)",
+                     update.statusText.empty() ? "?" : update.statusText.c_str());
+            diagPrint(buf);
+        }
         view.state = ui::PairingPresentationState::Pairing;
         break;
     case ml::PairingUpdateType::Succeeded:
@@ -3414,6 +3466,108 @@ void MoonlightApp::handleDeleteHost(ml::HostId hostId) {
 }
 
 // ---------------------------------------------------------------------------
+// Reset Moonlight
+// ---------------------------------------------------------------------------
+
+/// Handle a RequestResetMoonlight intent.
+///
+/// Performs a targeted persistent-storage reset:
+///   1. Clear the trusted-host store (forget every paired host).
+///   2. Delete the AppArtwork cache directory.
+///   3. Regenerate the client identity and refresh PairingManager's copy.
+///   4. Reset settings to defaults and persist.
+///   5. Clear the runtime host registry, runtime artwork, and catalog state.
+///   6. Return the UI to the Host List.
+///
+/// Only the targeted files/directories under /data/moonlight/ are touched:
+/// trusted_hosts.bin, the artwork/ directory, identity.bin, and settings.ini.
+/// /data/ and /data/moonlight/ themselves are left intact.
+void MoonlightApp::handleResetMoonlight() {
+    diagPrint("[reset] persistent-storage reset requested");
+
+    // --- 1. Clear the trusted-host store. -----------------------------------
+    if (m_pairingStore) {
+        m_pairingStore->clearTrustedHosts();
+    }
+
+    // --- 2. Delete the AppArtwork cache directory. --------------------------
+    // Only /data/moonlight/artwork is removed; it is recreated automatically
+    // when new artwork is fetched.
+    if (m_appArtworkManager) {
+        m_appArtworkManager->clearAllCache();
+    }
+
+    // --- 3. Regenerate the client identity and refresh PairingManager. -----
+    // Delete identity.bin and generate a fresh identity, then push it into
+    // PairingManager so subsequent pairing/serverinfo requests use the new
+    // identity.
+    if (m_pairingStore) {
+        if (m_pairingStore->resetIdentity(m_clientIdentity)) {
+            if (m_pairingManager) {
+                m_pairingManager->refreshIdentity(m_clientIdentity);
+            }
+        } else {
+            diagPrint("[reset] identity regeneration failed");
+        }
+    }
+
+    // --- 4. Reset settings to defaults and persist. -------------------------
+    if (m_settingsManager) {
+        m_settingsManager->resetToDefaults();
+        // Push the default presentation style / quit-dialog preference to the
+        // UI manager so the Host/App List renders in the default mode.
+        if (m_ui) {
+            m_ui->setPresentationStyle(
+                m_settingsManager->settings().presentationStyle);
+            m_ui->setShowQuitAppDialog(
+                m_settingsManager->settings().showQuitAppDialog);
+        }
+    }
+
+    // --- 5. Clear runtime host registry, artwork, and catalog state. --------
+    if (m_hostManager) {
+        m_hostManager->clear();
+    }
+    clearRuntimeArtwork();
+    if (m_applicationCatalog) {
+        m_applicationCatalog->cancel();
+    }
+    m_catalogHostId = 0;
+    m_catalogGeneration = 0;
+    m_catalogApplications.clear();
+    m_catalogState = ml::ApplicationCatalogState::Idle;
+    m_appListPollHostId = 0;
+    m_appListNextPollUs = 0;
+    m_pendingPairingAutoOpenHostId = 0;
+    m_pendingManualAddHostId = 0;
+    m_pendingManualAddWasExisting = false;
+    m_serverInfoGenerations.clear();
+    m_probeInFlightHosts.clear();
+    m_prevHostAvailability.clear();
+    m_prevHostAvailabilityValid = false;
+
+    // --- 6. Return the UI to the Host List. --------------------------------
+    // Close the Help screen first (so the App List view transition below is not
+    // suppressed by the Help-open guard), then reset the UI to the Host List.
+    // Force the host snapshot to refresh so the (now empty) Host List is shown.
+    if (m_ui && m_ui->isInitialized()) {
+        m_ui->setHosts(std::vector<ml::Host>());
+        m_ui->closeHelp();
+        // Force the screen to the Host List regardless of the Help return
+        // screen (which may have been the App List).
+        ui::ApplicationListView view;
+        view.state = ml::ApplicationCatalogState::Idle;
+        m_ui->setApplicationListView(view);
+    }
+    m_lastUiHostsValid = false;
+    m_lastUiHosts.clear();
+    m_prevHelpValid = false;
+    m_prevResetConfirmOpen = false;
+
+    diagPrint("[reset] persistent-storage reset complete");
+}
+
+// ---------------------------------------------------------------------------
 // Pairing-state reconciliation
 // ---------------------------------------------------------------------------
 
@@ -3502,6 +3656,140 @@ void MoonlightApp::reconcileHostPairingState(ml::HostId hostId) {
         }
         // Unknown: keep waiting for a definitive reconciliation result.
     }
+}
+
+// ---------------------------------------------------------------------------
+// Server-side unpair handling
+// ---------------------------------------------------------------------------
+
+/// Handle a server-side unpair of this client by a host.
+///
+/// Called when an authenticated HTTPS serverinfo query reports the host no
+/// longer considers this client paired while the client still holds local
+/// trust for it. Removes the persisted local trust record and reconciles the
+/// host's pairing state to Unpaired. The host is kept in the registry (it is
+/// still present on the network) so the user can re-pair it.
+///
+/// This does NOT force-stop an active stream: a server-side unpair terminates
+/// the stream naturally (like a disconnect), and the centralized App List
+/// guard (leaveAppListIfHostUnpaired, called each frame from update()) returns
+/// the user to the Host List once the stream has ended.
+void MoonlightApp::handleServerSideUnpair(ml::HostId hostId) {
+    if (!m_hostManager || !m_pairingManager) {
+        return;
+    }
+
+    const ml::Host* host = m_hostManager->findHost(hostId);
+    if (host == nullptr) {
+        return;
+    }
+
+    // Guard: only act when the client actually holds local trust for this
+    // host. If trust was already removed (e.g., a prior unpair), there is
+    // nothing further to do.
+    if (host->serverId.empty() ||
+        !m_pairingManager->hasLocalTrustForServer(host->serverId)) {
+        return;
+    }
+
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "[app] server-side unpair: removing local trust for host id=%llu serverId='%s'",
+             static_cast<unsigned long long>(hostId),
+             host->serverId.c_str());
+    diagPrint(buf);
+
+    // --- 1. Remove the persisted local trust/pairing record. ---------------
+    // The host no longer trusts this client, so the client must not retain a
+    // stale pairing record. On persistence failure the runtime host is still
+    // reconciled to Unpaired below (the in-memory state is authoritative for
+    // this session), but the stale disk record would resurface on restart.
+    bool persistOk = m_pairingManager->removeLocalTrustForServer(host->serverId);
+    if (!persistOk) {
+        diagPrint("[app] server-side unpair: failed to persist local trust removal");
+    }
+
+    // --- 2. Reconcile the host's pairing state to Unpaired. ----------------
+    // After trust removal, reconcileHostPairingState maps local=no/server=no
+    // to Unpaired. The host remains in the registry as an unpaired host.
+    reconcileHostPairingState(hostId);
+
+    // --- 3. Clear any host-owned cached state. -----------------------------
+    // The host is no longer paired, so its cached app artwork is no longer
+    // relevant. Runtime decoded artwork for the host is cleared below if it is
+    // the current catalog host.
+    if (m_appArtworkManager && !host->serverId.empty()) {
+        m_appArtworkManager->removeHostCache(host->serverId);
+    }
+
+    // If the unpaired host was pending auto-open after pairing, abandon it.
+    if (m_pendingPairingAutoOpenHostId == hostId) {
+        m_pendingPairingAutoOpenHostId = 0;
+    }
+
+    // The centralized App List guard (leaveAppListIfHostUnpaired) runs each
+    // frame from update() and will back out to the Host List if the user is on
+    // this host's App List (and not streaming). If a stream is active, the
+    // stream will terminate naturally and the guard fires once it returns to
+    // the App List.
+}
+
+/// Centralized guard: if the current App List host is no longer paired (no
+/// local trust) or no longer present, back out of the App List to the Host
+/// List. Called once per frame from update() (and thus after any stream
+/// terminal handler has returned to the App List). No-op when not on the App
+/// List or while a stream is active.
+void MoonlightApp::leaveAppListIfHostUnpaired() {
+    if (!m_hostManager || !m_pairingManager || !m_ui) {
+        return;
+    }
+
+    // No-op when not on the App List.
+    if (m_catalogHostId == 0) {
+        return;
+    }
+
+    // No-op while a stream is active: the stream must terminate first (a
+    // server-side unpair does this naturally). Once the stream ends and the
+    // user is returned to the App List, this guard fires on a subsequent
+    // frame.
+    if (m_streamActive) {
+        return;
+    }
+
+    const ml::Host* host = m_hostManager->findHost(m_catalogHostId);
+    const bool hostStillPaired =
+        host != nullptr &&
+        !host->serverId.empty() &&
+        m_pairingManager->hasLocalTrustForServer(host->serverId);
+
+    // If the catalog host is still present and paired, stay on the App List.
+    if (hostStillPaired) {
+        return;
+    }
+
+    // The catalog host is no longer paired (or no longer present). Back out of
+    // the App List to the Host List.
+    diagPrint("[app] App List host no longer paired — returning to Host List");
+
+    // Cancel any in-flight catalog request.
+    if (m_applicationCatalog && m_applicationCatalog->isLoading()) {
+        m_applicationCatalog->cancel();
+    }
+
+    // Clear the current catalog state.
+    m_catalogHostId = 0;
+    m_catalogGeneration = 0;
+    m_catalogApplications.clear();
+    m_catalogState = ml::ApplicationCatalogState::Idle;
+
+    // Clear runtime artwork and scheduling state for the previous host.
+    clearRuntimeArtwork();
+
+    // Return the UI to the Host List.
+    ui::ApplicationListView view;
+    view.state = ml::ApplicationCatalogState::Idle;
+    m_ui->setApplicationListView(view);
 }
 
 // ---------------------------------------------------------------------------
@@ -5664,16 +5952,18 @@ void MoonlightApp::restoreTrustedHosts() {
 }
 
 // ---------------------------------------------------------------------------
-// Paired-host HTTPS reachability fallback polling
+// Paired-host HTTPS serverinfo polling
 // ---------------------------------------------------------------------------
 
-/// Update the paired-host HTTPS reachability fallback polling cadence.
+/// Update the paired-host HTTPS serverinfo polling cadence.
 ///
 /// Called once per frame from update(). At a low frequency (~5 s), probes at
-/// most one eligible paired host that is not currently observed via mDNS and
-/// has a known endpoint. A successful probe marks the host reachable (Online)
-/// and refreshes its metadata. No-op when no eligible host exists or another
-/// serverinfo request is already pending.
+/// most one eligible paired host that has a known endpoint. A successful probe
+/// marks the host reachable (Online), refreshes its metadata, and — because
+/// the authenticated HTTPS serverinfo query reports PairStatus — detects a
+/// server-side unpair of this client even while the host is Online via mDNS
+/// and the user is on the Host List. No-op when no eligible host exists or
+/// another serverinfo request is already pending.
 void MoonlightApp::updatePairedHostProbe() {
     if (!m_hostManager || !m_serverInfoManager || !m_pairingManager) {
         return;
@@ -5700,20 +5990,17 @@ void MoonlightApp::updatePairedHostProbe() {
         const size_t idx = (start + i) % hosts.size();
         const ml::Host& host = hosts[idx];
 
-        // Eligibility: locally trusted/paired, has a known usable endpoint,
-        // and is not currently being observed via mDNS.
+        // Eligibility: locally trusted/paired and has a known usable endpoint.
+        // Paired hosts are probed periodically regardless of mDNS state so a
+        // server-side unpair (which the authenticated HTTPS serverinfo query
+        // reports as PairStatus=0) is detected even while the host is Online
+        // via mDNS and the user is on the Host List. This mirrors the
+        // reference implementation, which continuously polls serverinfo for
+        // every known computer.
         if (host.pairingState != ml::HostPairingState::Paired) {
             continue;
         }
         if (host.ipv4Addresses.empty() || host.httpsPort == 0) {
-            continue;
-        }
-        // Skip hosts currently observed via mDNS (discovery takes precedence).
-        // A host is "currently observed via mDNS" while its last mDNS
-        // observation is fresh. Once mDNS stops and its freshness expires, the
-        // fallback probe becomes eligible again.
-        if (host.observedOnNetwork &&
-            (nowUs / 1000) - host.lastSeenMs < kMdnsFreshAfterMs) {
             continue;
         }
         // Skip hosts already covered by an active/pending serverinfo request

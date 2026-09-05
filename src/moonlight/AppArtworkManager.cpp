@@ -295,6 +295,56 @@ bool pngDimensionsFromFile(const char* path, uint32_t& outWidth, uint32_t& outHe
     return true;
 }
 
+/// Recursively remove a directory and all of its contents.
+///
+/// Walks the directory with sceKernelOpen + sceKernelGetdents, removing each
+/// entry (files via sceKernelUnlink, subdirectories via recursive calls), then
+/// removes the directory itself via sceKernelRmdir. Returns true on success
+/// (including when the directory does not exist).
+bool removeDirectoryRecursive(const std::string& dir) {
+    // Open the directory for listing. The OpenOrbis SDK does not provide the
+    // POSIX dirent.h / opendir / readdir / closedir API; directory listing is
+    // done via sceKernelOpen + sceKernelGetdents + sceKernelClose.
+    int fd = sceKernelOpen(dir.c_str(), O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) {
+        // Directory does not exist or cannot be opened — nothing to remove.
+        return true;
+    }
+
+    // Read directory entries in batches. The buffer must be aligned for struct
+    // dirent records (which contain a uint32 first field).
+    alignas(alignof(struct dirent)) char buf[4096];
+    for (;;) {
+        int n = sceKernelGetdents(fd, buf, static_cast<int>(sizeof(buf)));
+        if (n <= 0) {
+            break;
+        }
+        int off = 0;
+        while (off < n) {
+            struct dirent* de = reinterpret_cast<struct dirent*>(buf + off);
+            const char* name = de->d_name;
+            if (name[0] != '\0' && name[0] != '.') {
+                std::string child = dir;
+                child += "/";
+                child += name;
+                // Determine whether the entry is a directory.
+                OrbisKernelStat st;
+                if (sceKernelStat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                    removeDirectoryRecursive(child);
+                } else {
+                    sceKernelUnlink(child.c_str());
+                }
+            }
+            off += de->d_reclen;
+        }
+    }
+    sceKernelClose(fd);
+
+    // Remove the (now empty) directory.
+    sceKernelRmdir(dir.c_str());
+    return true;
+}
+
 /// Generate a random UUID string (36 chars + null).
 /// Uses sceKernelGetProcessTime and sceKernelReadTsc as a simple entropy
 /// source. This is NOT cryptographically secure; it is only used for the
@@ -883,6 +933,20 @@ bool AppArtworkManager::removeHostCache(const std::string& serverId) {
         awDiagPrint(buf);
     }
 
+    return true;
+}
+
+bool AppArtworkManager::clearAllCache() {
+    if (!m_impl || !m_impl->running.load()) {
+        return false;
+    }
+
+    // Remove the entire artwork cache root directory recursively. Only this
+    // directory is removed; /data/moonlight/ and /data/ are left intact. The
+    // cache is recreated automatically when new artwork is fetched.
+    removeDirectoryRecursive(kArtworkRootDir);
+
+    awDiagPrint("[artwork] cleared all artwork cache");
     return true;
 }
 

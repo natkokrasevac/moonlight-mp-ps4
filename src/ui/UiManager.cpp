@@ -236,6 +236,10 @@ struct UiManager::Impl {
     ml::HostId  deleteConfirmHostId = 0;
     std::string deleteConfirmHostName;
 
+    // --- Reset Moonlight confirmation dialog state --------------------------
+    bool        resetConfirmOpen = false;
+    bool        resetConfirmYes = false;
+
     // --- Add Host overlay state ---------------------------------------------
     enum class AddHostField : uint8_t {
         IpAddress,
@@ -333,6 +337,8 @@ UiResult UiManager::initialize() {
     m_impl->addHostValidationError.clear();
     m_impl->helpOpen = false;
     m_impl->helpReturnScreen = UiScreen::HostList;
+    m_impl->resetConfirmOpen = false;
+    m_impl->resetConfirmYes = false;
 
     m_impl->initialized = true;
     uiDiagPrint("[ui] initialization success");
@@ -374,6 +380,8 @@ void UiManager::shutdown() {
     m_impl->addHostValidationError.clear();
     m_impl->helpOpen = false;
     m_impl->helpReturnScreen = UiScreen::HostList;
+    m_impl->resetConfirmOpen = false;
+    m_impl->resetConfirmYes = false;
     m_impl->initialized = false;
 }
 
@@ -645,6 +653,16 @@ bool UiManager::isHelpOpen() const {
     return m_impl && m_impl->helpOpen;
 }
 
+void UiManager::closeHelp() {
+    if (!m_impl || !m_impl->helpOpen) {
+        return;
+    }
+    m_impl->helpOpen = false;
+    m_impl->screen = m_impl->helpReturnScreen;
+    m_impl->resetConfirmOpen = false;
+    m_impl->resetConfirmYes = false;
+}
+
 SettingsViewState UiManager::settingsViewSnapshot() const {
     if (m_impl) {
         return m_impl->settingsView;
@@ -654,6 +672,18 @@ SettingsViewState UiManager::settingsViewSnapshot() const {
 
 bool UiManager::isDeleteConfirmOpen() const {
     return m_impl && m_impl->deleteConfirmOpen;
+}
+
+bool UiManager::isResetConfirmOpen() const {
+    return m_impl && m_impl->resetConfirmOpen;
+}
+
+void UiManager::openResetConfirm() {
+    if (!m_impl) {
+        return;
+    }
+    m_impl->resetConfirmOpen = true;
+    m_impl->resetConfirmYes = false;   // Default to No.
 }
 
 void UiManager::setButtonAssignment(bool crossIsAccept) {
@@ -1084,6 +1114,18 @@ bool UiManager::buildModalRenderState(ModalRenderState& out) const {
         return true;
     }
 
+    if (m_impl->resetConfirmOpen) {
+        ModalRenderState state;
+        state.kind = ModalKind::ResetMoonlight;
+        state.title = UiStrings::kResetMoonlight;
+        state.message = UiStrings::kResetMoonlightWarning;
+        state.message2 = UiStrings::kResetMoonlightConfirm;
+        state.yesSelected = m_impl->resetConfirmYes;
+        state.crossIsAccept = m_impl->crossIsAccept;
+        out = std::move(state);
+        return true;
+    }
+
     return false;
 }
 
@@ -1477,6 +1519,37 @@ void UiManager::processInput(const UiInput& input) {
         return;
     }
 
+    // --- Reset Moonlight confirmation dialog: exclusive focus ---------------
+    if (m_impl->resetConfirmOpen) {
+        const bool prevYes = m_impl->resetConfirmYes;
+        if (input.leftPressed) {
+            m_impl->resetConfirmYes = false;
+        }
+        if (input.rightPressed) {
+            m_impl->resetConfirmYes = true;
+        }
+        if (m_impl->resetConfirmYes != prevYes) {
+            m_impl->pendingSoundIntent = UiSoundIntent::Cursor;
+        }
+
+        if (input.acceptPressed) {
+            if (m_impl->resetConfirmYes) {
+                m_impl->pendingIntent = UiIntent(UiIntentType::RequestResetMoonlight);
+            }
+            m_impl->resetConfirmOpen = false;
+            m_impl->pendingSoundIntent = UiSoundIntent::Accept;
+            return;
+        }
+
+        if (input.backPressed) {
+            m_impl->resetConfirmOpen = false;
+            m_impl->pendingSoundIntent = UiSoundIntent::Back;
+            return;
+        }
+
+        return;
+    }
+
     // --- Settings overlay: exclusive focus ----------------------------------
     if (m_impl->settingsOverlayOpen) {
         if (input.optionsPressed || input.backPressed) {
@@ -1599,8 +1672,13 @@ void UiManager::processInput(const UiInput& input) {
     }
 
     // Help screen: OK (accept) or Back closes Help and returns to the screen
-    // it was opened from.
+    // it was opened from. Triangle opens the Reset Moonlight confirmation.
     if (m_impl->screen == UiScreen::Help) {
+        if (input.trianglePressed) {
+            openResetConfirm();
+            m_impl->pendingSoundIntent = UiSoundIntent::Accept;
+            return;
+        }
         if (input.acceptPressed || input.backPressed) {
             m_impl->helpOpen = false;
             m_impl->screen = m_impl->helpReturnScreen;

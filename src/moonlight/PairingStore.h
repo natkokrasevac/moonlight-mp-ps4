@@ -137,6 +137,15 @@ public:
     /// unchanged.
     bool ensureIdentity(ClientIdentity& out);
 
+    /// Delete the persisted client identity and generate a fresh one.
+    /// Removes the identity file from disk, then regenerates a new identity
+    /// (RSA-2048 key + self-signed X.509 certificate + unique ID) and persists
+    /// it. On success `out` holds the new identity. Returns true on success.
+    ///
+    /// Used by the persistent-storage reset flow to give the client a brand
+    /// new identity (so previously paired hosts no longer recognize it).
+    bool resetIdentity(ClientIdentity& out);
+
     // --- Trusted hosts ------------------------------------------------------
 
     /// Load all trusted-host records. Returns true on success (even if empty).
@@ -144,6 +153,12 @@ public:
 
     /// Save all trusted-host records. Returns true on success.
     bool saveTrustedHosts(const std::vector<TrustedHost>& hosts);
+
+    /// Delete the persisted trusted-host file, clearing all trusted-host
+    /// records. Returns true on success (including when no file existed).
+    ///
+    /// Used by the persistent-storage reset flow to forget every paired host.
+    bool clearTrustedHosts();
 
     /// Find a trusted host by serverId. Returns true if found.
     bool findTrustedHost(const std::string& serverId, TrustedHost& out) const;

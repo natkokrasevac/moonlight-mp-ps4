@@ -101,6 +101,15 @@ constexpr const char* kPairing = "Pairing";
 constexpr const char* kHelp = "Help";
 /// Close (legend action). Used by the Help screen bottom legend (OK button).
 constexpr const char* kClose = "Back";
+/// Reset Moonlight (legend action / modal title). Used by the Help screen
+/// bottom legend (Triangle button) and the Reset Moonlight confirmation modal.
+constexpr const char* kResetMoonlight = "Reset Moonlight DX";
+/// Reset Moonlight warning (modal message line 1). Used by the Reset Moonlight
+/// confirmation modal.
+constexpr const char* kResetMoonlightWarning = "All settings and pairings will be lost when resetting.";
+/// Reset Moonlight confirm (modal message line 2). Used by the Reset Moonlight
+/// confirmation modal.
+constexpr const char* kResetMoonlightConfirm = "Do you really want to reset Moonlight DX?";
 
 // --- Help screen content ---------------------------------------------------
 /// In-stream button assignments (Help section header). Used by the Help screen.

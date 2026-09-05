@@ -184,6 +184,13 @@ struct HttpResult {
 
 /// A caller-owned cancellation flag. HttpClient checks it during a request and
 /// aborts the in-flight SDK operation when it becomes true.
+///
+/// To interrupt a *blocking* SDK call (e.g. sceHttpSendRequest waiting for a
+/// slow/held response), HttpClient registers an abort callback on the token
+/// before entering the blocking call. When cancel() is invoked from another
+/// thread, it both sets the flag and fires the abort callback, which calls
+/// sceHttpAbortRequest() on the active request so the blocked call returns
+/// promptly instead of waiting out its full timeout.
 class HttpCancellationToken {
 public:
     HttpCancellationToken() = default;
@@ -192,10 +199,36 @@ public:
     bool cancelled() const { return m_cancelled.load(std::memory_order_acquire); }
 
     /// Request cancellation. Safe to call from any thread.
-    void cancel() { m_cancelled.store(true, std::memory_order_release); }
+    /// Sets the flag and, if an abort callback is registered, fires it so an
+    /// in-flight blocking SDK request is interrupted.
+    void cancel() {
+        m_cancelled.store(true, std::memory_order_release);
+        AbortFn fn = m_abortFn.load(std::memory_order_acquire);
+        if (fn != nullptr) {
+            fn(m_abortCtx.load(std::memory_order_acquire));
+        }
+    }
+
+    /// Register an abort callback (and its context) that cancel() will fire.
+    /// Called by HttpClient just before entering a blocking SDK call. The
+    /// callback must be safe to invoke from any thread.
+    void setAbort(void (*fn)(void*), void* ctx) {
+        m_abortCtx.store(ctx, std::memory_order_release);
+        m_abortFn.store(fn, std::memory_order_release);
+    }
+
+    /// Clear any registered abort callback. Called by HttpClient after the
+    /// blocking SDK call returns.
+    void clearAbort() {
+        m_abortFn.store(nullptr, std::memory_order_release);
+        m_abortCtx.store(nullptr, std::memory_order_release);
+    }
 
 private:
+    using AbortFn = void (*)(void*);
     std::atomic<bool> m_cancelled{false};
+    std::atomic<AbortFn> m_abortFn{nullptr};
+    std::atomic<void*> m_abortCtx{nullptr};
 };
 
 // ---------------------------------------------------------------------------

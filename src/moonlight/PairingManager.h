@@ -197,6 +197,12 @@ public:
     /// Valid only after initialize() succeeds.
     const std::string& clientKeyPem() const;
 
+    /// Replace the cached client identity with a freshly generated one.
+    /// Used by the persistent-storage reset flow after PairingStore has
+    /// regenerated the identity, so subsequent pairing/serverinfo requests use
+    /// the new identity. The identity must be valid (all fields non-empty).
+    void refreshIdentity(const ClientIdentity& identity);
+
     /// Start a pairing operation for the given target.
     /// Returns AlreadyPairing if a pairing is already active.
     PairingResult startPairing(const PairingTarget& target);

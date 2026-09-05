@@ -140,10 +140,19 @@ void ModalRenderer::renderFull(const ModalRenderState& state,
                     UiTheme::kPanelBorderR, UiTheme::kPanelBorderG, UiTheme::kPanelBorderB, 255);
 
     // 3. Modal content.
-    if (state.kind == ModalKind::DeleteHost) {
+    switch (state.kind) {
+    case ModalKind::DeleteHost:
         drawDeleteHostContent(state, comp);
-    } else {
+        break;
+    case ModalKind::QuitApp:
         drawQuitAppContent(state, comp);
+        break;
+    case ModalKind::ResetMoonlight:
+        drawResetMoonlightContent(state, comp);
+        break;
+    default:
+        drawQuitAppContent(state, comp);
+        break;
     }
 }
 
@@ -171,10 +180,19 @@ void ModalRenderer::renderRegion(const ModalRenderState& state,
 
     // Redraw the choice buttons if they intersect the dirty region.
     if (rectsIntersect(dirty, choiceBounds(state.kind))) {
-        if (state.kind == ModalKind::DeleteHost) {
+        switch (state.kind) {
+        case ModalKind::DeleteHost:
             drawDeleteHostChoices(state, comp);
-        } else {
+            break;
+        case ModalKind::QuitApp:
             drawQuitAppChoices(state, comp);
+            break;
+        case ModalKind::ResetMoonlight:
+            drawResetMoonlightChoices(state, comp);
+            break;
+        default:
+            drawQuitAppChoices(state, comp);
+            break;
         }
     }
 
@@ -319,6 +337,100 @@ void ModalRenderer::drawQuitAppChoices(const ModalRenderState& state,
         return;
     }
     const ps4::Rect panel = panelBounds(ModalKind::QuitApp);
+    const float margin = 32.0f;
+    const float choiceWidth = 160.0f;
+    const float choiceHeight = 56.0f;
+    const float gap = 40.0f;
+    const float totalWidth = choiceWidth * 2.0f + gap;
+    const float startX = panel.x + (panel.w - totalWidth) * 0.5f;
+    const float y = panel.y + panel.h - choiceHeight - margin;
+
+    float baselineY = 0.0f, lineHeight = 0.0f;
+    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Regular,
+                                 baselineY, lineHeight);
+
+    // No choice.
+    const int noX = static_cast<int>(startX);
+    const int noY = static_cast<int>(y);
+    if (!state.yesSelected) {
+        comp.fillRect(noX, noY, static_cast<int>(choiceWidth),
+                      static_cast<int>(choiceHeight),
+                      UiTheme::kSelectionR, UiTheme::kSelectionG, UiTheme::kSelectionB, 255);
+        comp.strokeRect(noX, noY, static_cast<int>(choiceWidth),
+                        static_cast<int>(choiceHeight), 2,
+                        UiTheme::kAccentR, UiTheme::kAccentG, UiTheme::kAccentB, 255);
+    }
+    drawCenteredText(comp, *m_fonts, ps4::FontRasterizer::FontFace::Regular,
+                     UiStrings::kNo, static_cast<float>(noX), choiceWidth,
+                     y + (choiceHeight - lineHeight) * 0.5f + baselineY,
+                     UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+
+    // Yes choice.
+    const int yesX = static_cast<int>(startX + choiceWidth + gap);
+    if (state.yesSelected) {
+        comp.fillRect(yesX, noY, static_cast<int>(choiceWidth),
+                      static_cast<int>(choiceHeight),
+                      UiTheme::kSelectionR, UiTheme::kSelectionG, UiTheme::kSelectionB, 255);
+        comp.strokeRect(yesX, noY, static_cast<int>(choiceWidth),
+                        static_cast<int>(choiceHeight), 2,
+                        UiTheme::kAccentR, UiTheme::kAccentG, UiTheme::kAccentB, 255);
+    }
+    drawCenteredText(comp, *m_fonts, ps4::FontRasterizer::FontFace::Regular,
+                     UiStrings::kYes, static_cast<float>(yesX), choiceWidth,
+                     y + (choiceHeight - lineHeight) * 0.5f + baselineY,
+                     UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+}
+
+// ---------------------------------------------------------------------------
+// Reset Moonlight modal content
+// ---------------------------------------------------------------------------
+
+void ModalRenderer::drawResetMoonlightContent(const ModalRenderState& state,
+                                              ps4::UiCompositor& comp) {
+    if (!m_fonts) {
+        return;
+    }
+    const ps4::Rect panel = panelBounds(ModalKind::ResetMoonlight);
+    const float margin = 32.0f;
+    const float contentX = static_cast<float>(panel.x) + margin;
+
+    float baselineY = 0.0f, lineHeight = 0.0f;
+
+    // Title (Bold).
+    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
+                                 baselineY, lineHeight);
+    comp.drawText(ps4::FontRasterizer::FontFace::Bold, state.title.c_str(),
+                  contentX, panel.y + margin + baselineY,
+                  UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+
+    // Separator.
+    comp.fillRect(panel.x, static_cast<int>(panel.y + margin + 50.0f),
+                  panel.w, 2, UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
+
+    // Message line 1 (Regular, secondary).
+    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Regular,
+                                 baselineY, lineHeight);
+    comp.drawText(ps4::FontRasterizer::FontFace::Regular, state.message.c_str(),
+                  contentX, panel.y + margin + 90.0f + baselineY,
+                  UiTheme::kSecondaryTextR, UiTheme::kSecondaryTextG, UiTheme::kSecondaryTextB);
+
+    // Message line 2 (Regular, secondary).
+    if (!state.message2.empty()) {
+        comp.drawText(ps4::FontRasterizer::FontFace::Regular, state.message2.c_str(),
+                      contentX, panel.y + margin + 130.0f + baselineY,
+                      UiTheme::kSecondaryTextR, UiTheme::kSecondaryTextG, UiTheme::kSecondaryTextB);
+    }
+
+    // No/Yes choices.
+    drawResetMoonlightChoices(state, comp);
+}
+
+void ModalRenderer::drawResetMoonlightChoices(const ModalRenderState& state,
+                                              ps4::UiCompositor& comp) {
+    if (!m_fonts) {
+        return;
+    }
+    const ps4::Rect panel = panelBounds(ModalKind::ResetMoonlight);
     const float margin = 32.0f;
     const float choiceWidth = 160.0f;
     const float choiceHeight = 56.0f;

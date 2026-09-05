@@ -359,6 +359,108 @@ void generateUuid(char* outBuf, size_t bufSize) {
              static_cast<unsigned long long>(c & 0xFFFFFFFFFFFFULL));
 }
 
+/// Returns true if the response body is a protocol error envelope indicating
+/// the requesting client is not paired (the <root> element's status_code
+/// attribute is 401). Sunshine returns such an envelope (rather than a clean
+/// serverinfo body) when an unpaired client queries serverinfo over HTTPS.
+bool responseIndicatesUnpaired(const std::vector<uint8_t>& body) {
+    if (body.empty()) {
+        return false;
+    }
+    const std::string xml(reinterpret_cast<const char*>(body.data()), body.size());
+
+    // Locate the <root ...> opening tag.
+    const size_t rootStart = xml.find("<root");
+    if (rootStart == std::string::npos) {
+        return false;
+    }
+    const size_t rootEnd = xml.find('>', rootStart);
+    if (rootEnd == std::string::npos) {
+        return false;
+    }
+    const std::string rootTag = xml.substr(rootStart, rootEnd - rootStart);
+
+    // status_code="401" (allow single or double quotes).
+    return rootTag.find("status_code=\"401\"") != std::string::npos ||
+           rootTag.find("status_code='401'") != std::string::npos;
+}
+
+/// Outcome of a single serverinfo HTTP/HTTPS attempt.
+enum class ServerInfoAttempt {
+    Success,           ///< Valid serverinfo parsed.
+    Unpaired,          ///< Server reported the client is not paired (401).
+    TransportFailure,  ///< Transport-level failure.
+    HttpFailure,       ///< Non-200 HTTP status (not 401).
+    MalformedResponse, ///< HTTP 200 but body not parseable as serverinfo.
+    Cancelled
+};
+
+/// Perform one serverinfo request over the given transport and parse the
+/// result. Returns the outcome and, on Success, the parsed ServerInfo.
+ServerInfoAttempt performServerInfoAttempt(
+    HttpClient* httpClient,
+    const ServerInfoTarget& target,
+    const std::string& addr,
+    bool useTls,
+    uint16_t port,
+    HttpCancellationToken* cancellation,
+    ServerInfo& outInfo) {
+    // Build the request.
+    HttpRequest httpReq;
+    httpReq.method = HttpMethod::Get;
+    httpReq.address = addr;
+    httpReq.port = port;
+
+    // Build the target: /serverinfo?uniqueid=...&uuid=...
+    char uuidBuf[37];
+    generateUuid(uuidBuf, sizeof(uuidBuf));
+    std::string targetStr = "/serverinfo?uniqueid=";
+    targetStr += target.clientUniqueId;
+    targetStr += "&uuid=";
+    targetStr += uuidBuf;
+    httpReq.target = targetStr;
+
+    // For paired hosts, query over HTTPS with the client certificate so the
+    // server can report the correct PairStatus.
+    httpReq.useTls = useTls;
+    if (useTls) {
+        httpReq.tls.trustMode = HttpTlsTrustMode::Unverified;
+        httpReq.tls.clientCertPem = target.clientCertPem;
+        httpReq.tls.clientKeyPem = target.clientKeyPem;
+    }
+    httpReq.connectTimeoutMs = target.connectTimeoutMs;
+    httpReq.ioTimeoutMs = target.ioTimeoutMs;
+
+    // Execute the request.
+    HttpResponse httpResp;
+    HttpResult httpResult = httpClient->perform(httpReq, httpResp, cancellation);
+
+    if (cancellation != nullptr && cancellation->cancelled()) {
+        return ServerInfoAttempt::Cancelled;
+    }
+    if (!httpResult.succeeded()) {
+        return ServerInfoAttempt::TransportFailure;
+    }
+
+    // An HTTP 401, or a body envelope whose root status_code is 401, means the
+    // server no longer considers this client paired.
+    if (httpResp.statusCode == 401 || responseIndicatesUnpaired(httpResp.body)) {
+        return ServerInfoAttempt::Unpaired;
+    }
+    if (httpResp.statusCode != 200) {
+        return ServerInfoAttempt::HttpFailure;
+    }
+
+    // Parse the serverinfo body.
+    ServerInfo parsed;
+    if (!parseServerInfo(httpResp.body, parsed)) {
+        return ServerInfoAttempt::MalformedResponse;
+    }
+
+    outInfo = std::move(parsed);
+    return ServerInfoAttempt::Success;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -433,75 +535,112 @@ void* ServerInfoManager::serverInfoWorker(void* arg) {
                 }
                 ++attempts;
 
-                // --- Build the HttpRequest ---------------------------------
-                HttpRequest httpReq;
-                httpReq.method = HttpMethod::Get;
-                httpReq.address = addr;
-                httpReq.port = (target.useTls && target.httpsPort != 0)
-                                   ? target.httpsPort
-                                   : ((target.discoveryPort != 0)
-                                          ? target.discoveryPort
-                                          : kDefaultHttpPort);
+                // Determine the HTTPS port (if a paired HTTPS query is used)
+                // and the plain-HTTP port (discovery/bootstrap port).
+                const uint16_t httpsPort =
+                    (target.useTls && target.httpsPort != 0)
+                        ? target.httpsPort
+                        : 0;
+                const uint16_t httpPort =
+                    (target.discoveryPort != 0)
+                        ? target.discoveryPort
+                        : kDefaultHttpPort;
 
-                // Build the target: /serverinfo?uniqueid=...&uuid=...
-                char uuidBuf[37];
-                generateUuid(uuidBuf, sizeof(uuidBuf));
+                // --- Paired host: try HTTPS first --------------------------
+                // For a paired host, query over HTTPS with the client
+                // certificate so the server reports the correct PairStatus.
+                // If the server no longer considers this client paired, it
+                // returns a 401 error envelope rather than a clean serverinfo;
+                // in that case fall back to plain HTTP, which reports
+                // PairStatus=0 so the unpair is detected (matching the
+                // reference implementation).
+                if (target.useTls && httpsPort != 0) {
+                    ServerInfo parsed;
+                    ServerInfoAttempt outcome = performServerInfoAttempt(
+                        impl->httpClient, target, addr, true, httpsPort,
+                        &requestCancellation, parsed);
 
-                std::string targetStr = "/serverinfo?uniqueid=";
-                targetStr += target.clientUniqueId;
-                targetStr += "&uuid=";
-                targetStr += uuidBuf;
-                httpReq.target = targetStr;
+                    if (outcome == ServerInfoAttempt::Cancelled) {
+                        update.result = ServerInfoResult(ServerInfoResultCategory::Cancelled);
+                        requestCompleted = true;
+                        break;
+                    }
+                    if (outcome == ServerInfoAttempt::Success) {
+                        update.valid = true;
+                        update.info = std::move(parsed);
+                        update.result = ServerInfoResult();
+                        requestCompleted = true;
+                        break;
+                    }
+                    if (outcome == ServerInfoAttempt::Unpaired) {
+                        // The server reported this client is not paired. Fall
+                        // back to plain HTTP on the same address so the
+                        // serverinfo reports PairStatus=0.
+                        ServerInfo httpParsed;
+                        ServerInfoAttempt httpOutcome = performServerInfoAttempt(
+                            impl->httpClient, target, addr, false, httpPort,
+                            &requestCancellation, httpParsed);
 
-                // For paired hosts, query over HTTPS with the client
-                // certificate so the server can report the correct PairStatus.
-                httpReq.useTls = target.useTls;
-                if (target.useTls) {
-                    httpReq.tls.trustMode = HttpTlsTrustMode::Unverified;
-                    httpReq.tls.clientCertPem = target.clientCertPem;
-                    httpReq.tls.clientKeyPem = target.clientKeyPem;
+                        if (httpOutcome == ServerInfoAttempt::Cancelled) {
+                            update.result = ServerInfoResult(ServerInfoResultCategory::Cancelled);
+                            requestCompleted = true;
+                            break;
+                        }
+                        if (httpOutcome == ServerInfoAttempt::Success) {
+                            update.valid = true;
+                            update.info = std::move(httpParsed);
+                            update.result = ServerInfoResult();
+                            requestCompleted = true;
+                            break;
+                        }
+                        // HTTP fallback also failed — try the next address.
+                        continue;
+                    }
+                    if (outcome == ServerInfoAttempt::HttpFailure) {
+                        update.result = ServerInfoResult(ServerInfoResultCategory::HttpFailure);
+                        requestCompleted = true;
+                        break;
+                    }
+                    if (outcome == ServerInfoAttempt::MalformedResponse) {
+                        update.result = ServerInfoResult(ServerInfoResultCategory::MalformedResponse);
+                        requestCompleted = true;
+                        break;
+                    }
+                    // TransportFailure — try the next address.
+                    continue;
                 }
-                httpReq.connectTimeoutMs = target.connectTimeoutMs;
-                httpReq.ioTimeoutMs = target.ioTimeoutMs;
 
-                // --- Execute the request -----------------------------------
-                HttpResponse httpResp;
-                HttpResult httpResult = impl->httpClient->perform(
-                    httpReq, httpResp, &requestCancellation);
+                // --- Unpaired / no HTTPS port: plain HTTP ------------------
+                ServerInfo parsed;
+                ServerInfoAttempt outcome = performServerInfoAttempt(
+                    impl->httpClient, target, addr, false, httpPort,
+                    &requestCancellation, parsed);
 
-                if (impl->stopRequested.load() || requestCancellation.cancelled()) {
+                if (outcome == ServerInfoAttempt::Cancelled) {
                     update.result = ServerInfoResult(ServerInfoResultCategory::Cancelled);
                     requestCompleted = true;
                     break;
                 }
-
-                if (!httpResult.succeeded()) {
-                    // Transport failure — try next address.
-                    continue;
-                }
-
-                // --- Check HTTP status -------------------------------------
-                if (httpResp.statusCode != 200) {
-                    update.result = ServerInfoResult(ServerInfoResultCategory::HttpFailure,
-                                                     static_cast<uint32_t>(httpResp.statusCode));
+                if (outcome == ServerInfoAttempt::Success) {
+                    update.valid = true;
+                    update.info = std::move(parsed);
+                    update.result = ServerInfoResult();
                     requestCompleted = true;
                     break;
                 }
-
-                // --- Parse the response ------------------------------------
-                ServerInfo parsed;
-                if (!parseServerInfo(httpResp.body, parsed)) {
+                if (outcome == ServerInfoAttempt::HttpFailure) {
+                    update.result = ServerInfoResult(ServerInfoResultCategory::HttpFailure);
+                    requestCompleted = true;
+                    break;
+                }
+                if (outcome == ServerInfoAttempt::MalformedResponse) {
                     update.result = ServerInfoResult(ServerInfoResultCategory::MalformedResponse);
                     requestCompleted = true;
                     break;
                 }
-
-                // --- Success ------------------------------------------------
-                update.valid = true;
-                update.info = std::move(parsed);
-                update.result = ServerInfoResult();
-                requestCompleted = true;
-                break;
+                // TransportFailure (or Unpaired on a plain-HTTP query, which
+                // should not occur) — try the next address.
+                continue;
             }
 
             if (!requestCompleted) {

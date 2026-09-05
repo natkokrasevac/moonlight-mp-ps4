@@ -179,6 +179,14 @@ public:
     /// Intended for future host-removal/unpair integration.
     bool removeHostCache(const std::string& serverId);
 
+    /// Remove the entire persistent artwork cache root directory
+    /// (/data/moonlight/artwork) recursively. Only that directory is removed;
+    /// /data/moonlight/ and /data/ are left intact. The cache is recreated
+    /// automatically when new artwork is fetched. Returns true on success
+    /// (including when no cache directory existed). Used by the
+    /// persistent-storage reset flow.
+    bool clearAllCache();
+
 private:
     struct Impl;
     Impl* m_impl;

@@ -93,6 +93,20 @@ static void httpHttpsUnloadCert(int32_t httpId) {
     fn(httpId);
 }
 
+/// Abort callback invoked from another thread when a request is cancelled.
+/// `ctx` points to the active request id (int). sceHttpAbortRequest() interrupts
+/// a blocking sceHttpSendRequest()/sceHttpReadData() so the worker returns
+/// promptly instead of waiting out its full timeout.
+static void httpAbortRequest(void* ctx) {
+    if (ctx == nullptr) {
+        return;
+    }
+    const int reqId = *static_cast<const int*>(ctx);
+    if (reqId >= 0) {
+        sceHttpAbortRequest(reqId);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SSL verification callback
 // ---------------------------------------------------------------------------
@@ -465,6 +479,17 @@ HttpResult HttpClient::perform(const HttpRequest& request,
         goto cleanup;
     }
 
+    // Register an abort callback on the cancellation token so that a cancel()
+    // from another thread (e.g. the pairing Back button) calls
+    // sceHttpAbortRequest() and interrupts the blocking sceHttpSendRequest()
+    // below. Without this, a request that the server holds open (e.g. the
+    // getservercert PIN wait) would block until its full timeout even after
+    // cancellation. The context is a pointer to the local reqId, which stays
+    // valid for the duration of this perform() call.
+    if (cancellation != nullptr) {
+        cancellation->setAbort(httpAbortRequest, &reqId);
+    }
+
     rc = sceHttpSendRequest(reqId, nullptr, 0);
     if (rc < 0) {
         char dbg[256];
@@ -537,6 +562,11 @@ HttpResult HttpClient::perform(const HttpRequest& request,
 
 cleanup:
     // --- Deterministic cleanup of per-request resources ---------------------
+    // Clear the abort callback first so no stale callback can fire against a
+    // request id that is about to be deleted.
+    if (cancellation != nullptr) {
+        cancellation->clearAbort();
+    }
     if (reqId >= 0) {
         sceHttpDeleteRequest(reqId);
     }

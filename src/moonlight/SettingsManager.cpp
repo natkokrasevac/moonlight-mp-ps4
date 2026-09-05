@@ -366,4 +366,22 @@ bool SettingsManager::save() {
     return true;
 }
 
+bool SettingsManager::resetToDefaults() {
+    if (!m_impl->initialized) {
+        return false;
+    }
+
+    // Restore the in-memory settings to their safe defaults.
+    m_impl->settings = Settings();
+
+    // Persist the defaults to disk (overwriting the settings file).
+    const bool ok = save();
+    if (ok) {
+        smDiagPrint("[settings] reset to defaults");
+    } else {
+        smDiagPrint("[settings] reset to defaults failed to persist");
+    }
+    return ok;
+}
+
 } // namespace ml

@@ -382,12 +382,13 @@ void HelpRenderer::drawLegend(const HelpRenderState& state,
         return;
     }
 
-    // Legend entry: OK button + "Close".
-    LegendEntry entries[1];
+    // Legend entries: OK button + "Close", and Triangle + "Reset Moonlight".
+    LegendEntry entries[2];
     entries[0] = {backIcon(state.crossIsAccept), UiStrings::kClose};
+    entries[1] = {UiAtlasIcon::Triangle, UiStrings::kResetMoonlight};
 
     drawBottomLegend(comp, *m_fonts, m_atlasImg, bottomLegendBounds(),
-                     entries, 1);
+                     entries, 2);
 }
 
 } // namespace ui

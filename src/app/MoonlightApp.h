@@ -421,18 +421,18 @@ private:
     /// scheduled for the same HostId.
     std::vector<std::pair<ml::HostId, uint32_t>> m_serverInfoGenerations;
 
-    // --- Paired-host HTTPS reachability fallback polling state --------------
-    /// Monotonic deadline (µs) for the next fallback reachability probe.
+    // --- Paired-host HTTPS serverinfo polling state -------------------------
+    /// Monotonic deadline (µs) for the next paired-host serverinfo probe.
     /// 0 forces an immediate probe on the next update (used at startup for
     /// restored hosts with a persisted endpoint).
     uint64_t m_pairedHostProbeNextUs = 0;
-    /// Round-robin index into the host registry for the next fallback probe.
-    /// Each poll opportunity probes at most one eligible host, keeping traffic
-    /// low and avoiding bursts when several offline trusted hosts exist.
+    /// Round-robin index into the host registry for the next probe. Each poll
+    /// opportunity probes at most one eligible host, keeping traffic low and
+    /// avoiding bursts when several trusted hosts exist.
     size_t m_pairedHostProbeIndex = 0;
-    /// HostIds currently being probed via the paired-host HTTPS fallback.
-    /// Used to emit concise probe-completion diagnostics and to distinguish a
-    /// fallback probe result from an ordinary serverinfo query.
+    /// HostIds currently being probed via the paired-host HTTPS serverinfo
+    /// path. Used to emit concise probe-completion diagnostics and to
+    /// distinguish a probe result from an ordinary serverinfo query.
     std::vector<ml::HostId> m_probeInFlightHosts;
 
     // --- Host availability transition diagnostics ---------------------------
@@ -676,10 +676,16 @@ private:
     /// Whether the Quit App confirmation dialog was open on the previous
     /// CPU-active frame.
     bool m_prevQuitAppOpen = false;
+    /// Whether the Reset Moonlight confirmation dialog was open on the
+    /// previous CPU-active frame.
+    bool m_prevResetConfirmOpen = false;
     /// The previous Delete Host modal render snapshot (for dirty computation).
     ui::ModalRenderState m_prevDeleteModalState;
     /// The previous Quit App modal render snapshot (for dirty computation).
     ui::ModalRenderState m_prevQuitModalState;
+    /// The previous Reset Moonlight modal render snapshot (for dirty
+    /// computation).
+    ui::ModalRenderState m_prevResetModalState;
 
     /// Whether the Add Host overlay or status modal was open on the previous
     /// CPU-active frame.
@@ -736,9 +742,36 @@ private:
     /// the Host List. On persistence failure the host is left in place.
     void handleDeleteHost(ml::HostId hostId);
 
+    /// Handle a RequestResetMoonlight intent.
+    /// Performs a targeted persistent-storage reset: clears the trusted-host
+    /// store, deletes the AppArtwork cache, regenerates the client identity,
+    /// resets settings to defaults, and clears the runtime host registry and
+    /// runtime artwork. Returns the UI to the Host List.
+    void handleResetMoonlight();
+
     /// Reconcile a host's application-visible pairing state using local trust
     /// (PairingManager/PairingStore) and the server-reported pairing status.
     void reconcileHostPairingState(ml::HostId hostId);
+
+    /// Handle a server-side unpair of this client by a host.
+    ///
+    /// Called when an authenticated HTTPS serverinfo query reports the host no
+    /// longer considers this client paired (serverReportsPaired == false)
+    /// while the client still holds local trust for it. Removes the persisted
+    /// local trust record and reconciles the host's pairing state to Unpaired.
+    /// The host is kept in the registry (it is still present on the network)
+    /// so the user can re-pair it. Does NOT force-stop an active stream: a
+    /// server-side unpair terminates the stream naturally (like a disconnect),
+    /// and the centralized App List guard (leaveAppListIfHostUnpaired) returns
+    /// the user to the Host List once the stream has ended.
+    void handleServerSideUnpair(ml::HostId hostId);
+
+    /// Centralized guard: if the current App List host is no longer paired
+    /// (no local trust) or no longer present, back out of the App List to the
+    /// Host List. Called once per frame from update() (and thus after any
+    /// stream terminal handler has returned to the App List). No-op when not
+    /// on the App List or while a stream is active.
+    void leaveAppListIfHostUnpaired();
 
     /// Schedule a serverinfo query for a host.
     /// Called when a host is Added or returns Online.
@@ -991,11 +1024,13 @@ private:
     /// record is restored as an Offline, locally-trusted host.
     void restoreTrustedHosts();
 
-    /// Update the paired-host HTTPS reachability fallback polling cadence.
+    /// Update the paired-host HTTPS serverinfo polling cadence.
     /// Called once per frame from update(). At a low frequency (~5 s), probes
-    /// at most one eligible paired host that is not currently observed via
-    /// mDNS and has a known endpoint. A successful probe marks the host
-    /// reachable (Online) and refreshes its metadata. No-op when no eligible
+    /// at most one eligible paired host that has a known endpoint. A successful
+    /// probe marks the host reachable (Online), refreshes its metadata, and —
+    /// because the authenticated HTTPS serverinfo query reports PairStatus —
+    /// detects a server-side unpair of this client even while the host is
+    /// Online via mDNS and the user is on the Host List. No-op when no eligible
     /// host exists or another serverinfo request is already pending.
     void updatePairedHostProbe();
 

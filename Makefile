@@ -38,10 +38,15 @@ endif
 TOOLCHAIN_FILE := cmake/toolchain-ps4-$(CDIR).cmake
 TOOLS_DIR    := $(OO_PS4_TOOLCHAIN)/bin/$(CDIR)
 
-.PHONY: all clean ftp
+.PHONY: all clean ftp zip
 
 # Default target: build the pkg only (no FTP upload)
 all: $(CONTENT_ID).pkg
+
+# Zip target: build the pkg if needed, then create a zip archive and checksum
+zip: $(CONTENT_ID).pkg
+	zip $(CONTENT_ID).zip $(CONTENT_ID).pkg
+	shasum -a 256 $(CONTENT_ID).zip > $(CONTENT_ID)_sha.txt
 
 # FTP upload target: build the pkg if needed, then upload it
 ftp: $(CONTENT_ID).pkg
@@ -78,6 +83,6 @@ $(BUILD_DIR)/$(PROJECT_NAME).elf: $(SRCS) CMakeLists.txt
 	cmake --build $(BUILD_DIR)
 
 clean:
-	rm -rf $(BUILD_DIR) eboot.bin $(CONTENT_ID).pkg pkg.gp4 $(PKG_DIR)/sce_sys/param.sfo $(PKG_DIR)/eboot.bin $(PKG_DIR)/pkg.gp4
+	rm -rf $(BUILD_DIR) eboot.bin $(CONTENT_ID).pkg $(CONTENT_ID).zip checksum.txt pkg.gp4 $(PKG_DIR)/sce_sys/param.sfo $(PKG_DIR)/eboot.bin $(PKG_DIR)/pkg.gp4
 
 

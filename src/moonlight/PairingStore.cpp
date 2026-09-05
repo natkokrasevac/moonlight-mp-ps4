@@ -43,6 +43,7 @@
 #include "mbedtls/entropy.h"
 #include "mbedtls/bignum.h"
 #include "mbedtls/md.h"
+#include "mbedtls/sha256.h"
 
 // --- OpenOrbis SDK headers (private to this translation unit) -----------------------
 #include <orbis/libkernel.h>     // sceKernelMkdir
@@ -450,9 +451,29 @@ bool generateClientIdentity(ClientIdentity& out) {
                                   kIdentityKeyExponent);
         if (ret != 0) break;
 
-        // Serial = 0.
-        ret = mbedtls_mpi_lset(&serial, 0);
-        if (ret != 0) break;
+        // Serial: use a random positive 64-bit value.
+        // NOTE: mbedTLS 3.x encodes a serial of 0 as an empty INTEGER (02 00),
+        // which produces a malformed certificate that Sunshine/OpenSSL reject.
+        // mbedTLS 2.x encoded serial 0 as 02 01 00 (valid). Use a random
+        // positive serial instead, which is also RFC 5280 best practice.
+        {
+            uint8_t serialBytes[8];
+            if (!generateRandomBytes(serialBytes, sizeof(serialBytes))) {
+                ret = -1;
+                break;
+            }
+            // Force the high bit of the top byte to 0 so the serial is a
+            // positive INTEGER (avoids a leading sign byte in DER).
+            serialBytes[0] &= 0x7F;
+            ret = mbedtls_mpi_read_binary(&serial, serialBytes, sizeof(serialBytes));
+            if (ret != 0) break;
+            // Guard against an all-zero serial (astronomically unlikely but
+            // cheap to handle): fall back to 1.
+            if (mbedtls_mpi_cmp_int(&serial, 0) == 0) {
+                ret = mbedtls_mpi_lset(&serial, 1);
+                if (ret != 0) break;
+            }
+        }
 
         // Configure the certificate.
         mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
@@ -526,6 +547,51 @@ bool generateClientIdentity(ClientIdentity& out) {
             out.certPem = reinterpret_cast<const char*>(certPemBuf);
         }
 
+        // --- Self-check: verify the generated cert's public key matches the
+        // generated private key. If this fails, the server will reject the
+        // Stage 4 clientpairingsecret signature. ---
+        {
+            mbedtls_x509_crt checkCrt;
+            mbedtls_x509_crt_init(&checkCrt);
+            int checkRet = mbedtls_x509_crt_parse(
+                &checkCrt,
+                reinterpret_cast<const unsigned char*>(out.certPem.c_str()),
+                out.certPem.size() + 1);
+            if (checkRet == 0) {
+                // Sign a fixed test message with the private key.
+                const unsigned char testMsg[] = "moonlight-ps4-keypair-selfcheck";
+                unsigned char testHash[32];
+                mbedtls_sha256(testMsg, sizeof(testMsg) - 1, testHash, 0);
+                std::vector<unsigned char> testSig(mbedtls_pk_get_len(&key));
+                size_t testSigLen = 0;
+                int signRet = mbedtls_pk_sign(&key, MBEDTLS_MD_SHA256,
+                                              testHash, sizeof(testHash),
+                                              testSig.data(), testSig.size(),
+                                              &testSigLen,
+                                              mbedtls_ctr_drbg_random, &ctr_drbg);
+                if (signRet == 0) {
+                    int verifyRet = mbedtls_pk_verify(&checkCrt.pk, MBEDTLS_MD_SHA256,
+                                                      testHash, sizeof(testHash),
+                                                      testSig.data(), testSigLen);
+                    char dbg[192];
+                    snprintf(dbg, sizeof(dbg),
+                             "[pairingstore] keypair self-check: sign=%d verify=%d "
+                             "(0=OK, nonzero=mismatch)",
+                             signRet, verifyRet);
+                    psDiagPrint(dbg);
+                } else {
+                    psDiagPrint("[pairingstore] keypair self-check: SIGN FAILED");
+                }
+            } else {
+                char dbg[128];
+                snprintf(dbg, sizeof(dbg),
+                         "[pairingstore] keypair self-check: cert parse FAILED ret=-0x%04X",
+                         static_cast<unsigned>(-checkRet));
+                psDiagPrint(dbg);
+            }
+            mbedtls_x509_crt_free(&checkCrt);
+        }
+
         // Generate unique ID (16 hex chars from 8 random bytes).
         uint8_t idBytes[8];
         if (!generateRandomBytes(idBytes, sizeof(idBytes))) {
@@ -541,6 +607,19 @@ bool generateClientIdentity(ClientIdentity& out) {
         idHex[16] = '\0';
         out.uniqueId = idHex;
         out.deviceName = "roth";
+
+        {
+            // Diagnostic: log the generated identity sizes so a freshly
+            // generated identity can be compared against a persisted one.
+            char dbg[256];
+            snprintf(dbg, sizeof(dbg),
+                     "[pairingstore] generated identity: uniqueId='%s' "
+                     "certPem=%zu keyPem=%zu certDer=%zu keyDer=%zu",
+                     out.uniqueId.c_str(),
+                     out.certPem.size(), out.keyPem.size(),
+                     out.certDer.size(), out.keyDer.size());
+            psDiagPrint(dbg);
+        }
 
         mbedtls_pk_free(&key);
         mbedtls_x509write_crt_free(&crt);
@@ -713,7 +792,16 @@ bool PairingStore::ensureIdentity(ClientIdentity& out) {
         if (!out.uniqueId.empty() && !out.deviceName.empty() &&
             !out.certPem.empty() && !out.keyPem.empty() &&
             !out.certDer.empty() && !out.keyDer.empty()) {
-            psDiagPrint("[pairingstore] client identity loaded");
+            {
+                char dbg[256];
+                snprintf(dbg, sizeof(dbg),
+                         "[pairingstore] client identity loaded: uniqueId='%s' "
+                         "certPem=%zu keyPem=%zu certDer=%zu keyDer=%zu",
+                         out.uniqueId.c_str(),
+                         out.certPem.size(), out.keyPem.size(),
+                         out.certDer.size(), out.keyDer.size());
+                psDiagPrint(dbg);
+            }
             return true;
         }
         psDiagPrint("[pairingstore] loaded identity is invalid; regenerating");
@@ -732,6 +820,20 @@ bool PairingStore::ensureIdentity(ClientIdentity& out) {
     out = std::move(newIdentity);
     psDiagPrint("[pairingstore] client identity generated");
     return true;
+}
+
+bool PairingStore::resetIdentity(ClientIdentity& out) {
+    if (!m_impl->initialized) {
+        return false;
+    }
+
+    // Delete the persisted identity file so the next ensureIdentity() call
+    // generates a brand new identity. A missing file is not an error.
+    remove(kIdentityFilePath);
+    psDiagPrint("[pairingstore] client identity file removed (reset)");
+
+    // Regenerate and persist a fresh identity.
+    return ensureIdentity(out);
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +937,18 @@ bool PairingStore::saveTrustedHosts(const std::vector<TrustedHost>& hosts) {
     }
 
     return writeWholeFile(kTrustedHostsFilePath, out.data(), out.size());
+}
+
+bool PairingStore::clearTrustedHosts() {
+    if (!m_impl->initialized) {
+        return false;
+    }
+
+    // Delete the persisted trusted-host file. A missing file is not an error;
+    // loadTrustedHosts() already treats a missing file as an empty list.
+    remove(kTrustedHostsFilePath);
+    psDiagPrint("[pairingstore] trusted-hosts file removed (reset)");
+    return true;
 }
 
 bool PairingStore::findTrustedHost(const std::string& serverId, TrustedHost& out) const {

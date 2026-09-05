@@ -537,7 +537,14 @@ bool signDataSha256(const std::vector<uint8_t>& keyDer, const uint8_t* data, siz
 
     ret = mbedtls_pk_parse_key(&pk, keyDer.data(), keyDer.size(), nullptr, 0,
                                nullptr, nullptr);
-    if (ret != 0) goto cleanup;
+    if (ret != 0) {
+        char dbg[192];
+        snprintf(dbg, sizeof(dbg),
+                 "[pairing] signDataSha256: key parse FAILED ret=-0x%04X keyDerLen=%zu",
+                 static_cast<unsigned>(-ret), keyDer.size());
+        pmDiagPrint(dbg);
+        goto cleanup;
+    }
 
     {
         std::vector<uint8_t> sig(mbedtls_pk_get_len(&pk));
@@ -549,9 +556,25 @@ bool signDataSha256(const std::vector<uint8_t>& keyDer, const uint8_t* data, siz
         ret = mbedtls_pk_sign(&pk, MBEDTLS_MD_SHA256, hash, sizeof(hash),
                               sig.data(), sig.size(), &sigLen,
                               mbedtls_ctr_drbg_random, &ctr_drbg);
-        if (ret != 0) goto cleanup;
+        if (ret != 0) {
+            char dbg[192];
+            snprintf(dbg, sizeof(dbg),
+                     "[pairing] signDataSha256: sign FAILED ret=-0x%04X keyBits=%u",
+                     static_cast<unsigned>(-ret),
+                     static_cast<unsigned>(mbedtls_pk_get_bitlen(&pk)));
+            pmDiagPrint(dbg);
+            goto cleanup;
+        }
         sig.resize(sigLen);
         outSig = std::move(sig);
+        {
+            char dbg[192];
+            snprintf(dbg, sizeof(dbg),
+                     "[pairing] signDataSha256: OK sigLen=%zu keyBits=%u",
+                     outSig.size(),
+                     static_cast<unsigned>(mbedtls_pk_get_bitlen(&pk)));
+            pmDiagPrint(dbg);
+        }
     }
 
     mbedtls_pk_free(&pk);
@@ -1463,6 +1486,25 @@ const std::string& PairingManager::clientCertPem() const {
 
 const std::string& PairingManager::clientKeyPem() const {
     return m_impl->identity.keyPem;
+}
+
+void PairingManager::refreshIdentity(const ClientIdentity& identity) {
+    if (!m_impl) {
+        return;
+    }
+    // Only accept a valid identity (all required fields non-empty).
+    if (!identity.uniqueId.empty() &&
+        !identity.deviceName.empty() &&
+        !identity.certPem.empty() &&
+        !identity.keyPem.empty() &&
+        !identity.certDer.empty() &&
+        !identity.keyDer.empty()) {
+        m_impl->identity = identity;
+        m_impl->identityReady = true;
+        pmDiagPrint("[pairing] client identity refreshed (reset)");
+    } else {
+        pmDiagPrint("[pairing] refreshIdentity rejected: invalid identity");
+    }
 }
 
 // ---------------------------------------------------------------------------

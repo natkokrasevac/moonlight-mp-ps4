@@ -10,6 +10,8 @@ _sdk/
 # PS4 stage files
 *.gp4
 *.pkg
+*.zip
+*_sha.txt
 eboot.bin
 param.sfo
 

@@ -132,6 +132,11 @@ public:
     /// Save the current in-memory settings to disk. Returns true on success.
     bool save();
 
+    /// Reset the in-memory settings to their safe defaults and persist them to
+    /// disk (overwriting the settings file). Used by the persistent-storage
+    /// reset flow. Returns true on success.
+    bool resetToDefaults();
+
 private:
     struct Impl;
     Impl* m_impl;

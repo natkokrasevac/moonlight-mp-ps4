@@ -124,6 +124,14 @@ private:
     void drawQuitAppChoices(const ModalRenderState& state,
                             ps4::UiCompositor& comp);
 
+    /// Draw the Reset Moonlight modal content into `comp` (panel already drawn).
+    void drawResetMoonlightContent(const ModalRenderState& state,
+                                   ps4::UiCompositor& comp);
+
+    /// Draw the Reset Moonlight No/Yes choice buttons into `comp`.
+    void drawResetMoonlightChoices(const ModalRenderState& state,
+                                   ps4::UiCompositor& comp);
+
     /// True if two rectangles intersect.
     static bool rectsIntersect(const ps4::Rect& a, const ps4::Rect& b);
 

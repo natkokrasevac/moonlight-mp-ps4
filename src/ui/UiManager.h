@@ -194,7 +194,8 @@ struct SettingsRenderState {
 /// The kind of confirmation modal to render.
 enum class ModalKind : uint8_t {
     DeleteHost,           ///< Delete Host confirmation (No/Yes choices).
-    QuitApp               ///< Quit-app confirmation (No/Yes choices).
+    QuitApp,              ///< Quit-app confirmation (No/Yes choices).
+    ResetMoonlight        ///< Reset Moonlight confirmation (No/Yes choices).
 };
 
 /// Render snapshot for a CPU confirmation modal.
@@ -202,6 +203,7 @@ struct ModalRenderState {
     ModalKind kind = ModalKind::DeleteHost;
     std::string title;       ///< Modal title.
     std::string message;     ///< Explanatory message.
+    std::string message2;    ///< Optional second message line (ResetMoonlight only).
     std::string hostName;    ///< Host display name (DeleteHost only).
     bool yesSelected = false; ///< Selected option (No/Yes modals only; false = No).
     bool crossIsAccept = true; ///< System Enter Button Assignment.
@@ -272,7 +274,8 @@ enum class UiIntentType : uint8_t {
     CloseSettings,
     RequestDeleteHost,
     RequestAddHost,
-    CancelAddHost
+    CancelAddHost,
+    RequestResetMoonlight
 };
 
 /// A user intent emitted by UiManager and consumed by MoonlightApp.
@@ -488,11 +491,22 @@ public:
     /// Returns true while the Help screen is open.
     bool isHelpOpen() const;
 
+    /// Close the Help screen and return to the screen it was opened from.
+    /// Used by the persistent-storage reset flow (after a reset the client
+    /// returns to the Host List). No-op when Help is not open.
+    void closeHelp();
+
     /// Returns the current Settings working-copy values.
     SettingsViewState settingsViewSnapshot() const;
 
     /// Returns true while the Delete Host confirmation dialog is open.
     bool isDeleteConfirmOpen() const;
+
+    /// Returns true while the Reset Moonlight confirmation dialog is open.
+    bool isResetConfirmOpen() const;
+
+    /// Open the Reset Moonlight confirmation dialog (defaults to No).
+    void openResetConfirm();
 
     /// Set the system's Enter Button Assignment.
     void setButtonAssignment(bool crossIsAccept);
