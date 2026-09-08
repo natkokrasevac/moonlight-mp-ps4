@@ -242,7 +242,7 @@ constexpr int32_t kDmemProt = ORBIS_KERNEL_PROT_CPU_RW | ORBIS_KERNEL_PROT_GPU_A
 /// lifetime contract (retainAu / retireExpiredAus) keeps each compressed AU
 /// alive for the full pipeline depth, preventing the stale-content corruption
 /// that previously occurred at depth > 1.
-constexpr uint32_t kDecodePipelineDepth = 2;
+constexpr uint32_t kDecodePipelineDepth = 4;
 
 /// DPB frame count.
 constexpr int32_t kMaxDpbFrameCount = 4;
@@ -523,6 +523,8 @@ struct DecodedVideoFrame::Impl {
     bool valid = false;
 
     uint64_t frameNumber = 0;
+    uint64_t presentationTimeUs = 0;
+    uint64_t decodeTimeUs = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t surfaceHeight = 0;
@@ -589,6 +591,14 @@ bool DecodedVideoFrame::isValid() const {
 
 uint64_t DecodedVideoFrame::frameNumber() const {
     return m_impl ? m_impl->frameNumber : 0;
+}
+
+uint64_t DecodedVideoFrame::presentationTimeUs() const {
+    return m_impl ? m_impl->presentationTimeUs : 0;
+}
+
+uint64_t DecodedVideoFrame::decodeTimeUs() const {
+    return m_impl ? m_impl->decodeTimeUs : 0;
 }
 
 uint32_t DecodedVideoFrame::width() const {
@@ -934,6 +944,8 @@ void* VideoDecoder::decoderWorker(void* arg) {
         frameImpl->frameBufferIndex = bufIndex;
         frameImpl->valid = true;
         frameImpl->frameNumber = unit.frameNumber;
+        frameImpl->presentationTimeUs = unit.presentationTimeUs;
+        frameImpl->decodeTimeUs = elapsedUs;
         frameImpl->width = outputInfo.frameWidth;
         frameImpl->height = impl->config.height;
         frameImpl->surfaceHeight = outputInfo.frameHeight;

@@ -1,0 +1,42 @@
+// PSSL vertex shader — fullscreen NV12→BGRA video pass.
+//
+// Generates a fullscreen triangle from the vertex ID (no vertex buffers, no
+// fetch shader), matching the procedural pattern proven in gpu_triangle_smoke.c.
+// Outputs clip-space position plus normalized UV coordinates so the pixel
+// shader can sample the decoded Videodec2 NV12 Y/UV planes.
+//
+// Y orientation: the render target uses a POSITIVE viewport Y scale, so
+// clip-space Y = -1 maps to framebuffer row 0 (top) and clip-space Y = +1
+// maps to the bottom. Decoded NV12 row 0 is the top of the image, so the
+// texture V coordinate must be 0 at the top and 1 at the bottom. No V flip
+// is applied (a flip would present the video upside down). The triangle
+// covers the whole viewport with UV in [0,1]×[0,1].
+
+struct VS_OUTPUT {
+    float4 pos : S_POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VS_OUTPUT main(uint id : S_VERTEX_ID) {
+    VS_OUTPUT o;
+
+    // Fullscreen triangle (covers the whole viewport). The third vertex is
+    // far off-screen to the lower-right so the triangle spans the full
+    // clip-space rectangle.
+    float2 pos;
+    float2 uv;
+    if (id == 0) {
+        pos = float2(-1.0, -1.0);
+        uv  = float2(0.0, 0.0);
+    } else if (id == 1) {
+        pos = float2(3.0, -1.0);
+        uv  = float2(2.0, 0.0);
+    } else {
+        pos = float2(-1.0, 3.0);
+        uv  = float2(0.0, 2.0);
+    }
+
+    o.pos = float4(pos, 0.0, 1.0);
+    o.uv  = uv;
+    return o;
+}

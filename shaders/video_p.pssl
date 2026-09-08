@@ -1,0 +1,74 @@
+// PSSL pixel shader — NV12 → BGRA (RGBA byte order) fullscreen video pass.
+//
+// Samples the decoded Videodec2 NV12 Y and UV planes and converts to the
+// byte/channel order required by the existing A8B8G8R8_SRGB VideoOut
+// framebuffer (byte 0 = R, byte 1 = G, byte 2 = B, byte 3 = A), matching the
+// CPU Nv12Converter output exactly.
+//
+// The math reproduces the CPU Nv12Converter (BT.709, limited range):
+//   Yexp = (clamp(Y,16,235) - 16) * 149 / 128
+//   U = uv.x - 128 ; V = uv.y - 128
+//   R = Yexp + (229 * V) / 128
+//   G = Yexp - (27 * U + 68 * V) / 128
+//   B = Yexp + (270 * U) / 128
+//   clamp each to [0,255], alpha = 255
+//
+// The render target is created as R8G8B8A8_UNORM (NOT sRGB) so the GPU writes
+// the raw computed bytes exactly as the CPU converter does — the display
+// hardware applies the sRGB interpretation via the VideoOut A8B8G8R8_SRGB
+// buffer attribute. Using an sRGB render target would apply an extra
+// linear->sRGB encode on write and change the colors vs. the CPU path.
+//
+// Nearest/point sampling is used (per the task: no bilinear unless there is a
+// clear reason otherwise). The UV plane is sampled at the 4:2:0 chroma
+// coordinate corresponding to each output pixel.
+
+SamplerState smpY  : register(s0);
+SamplerState smpUV : register(s1);
+Texture2D    texY  : register(t0);
+Texture2D    texUV : register(t1);
+
+// Constant buffer carrying the per-frame NV12 geometry (pitch/dimensions) and
+// the BT.709 conversion coefficients. Values are set by the renderer.
+ConstantBuffer cb_video : register(b0)
+{
+    float4 yuvOffset;    // (16/255, 128/255, 128/255, 0) limited-range offsets
+    float4 uvScale;      // (1.0, 1.0, 0, 0) full UV plane coverage
+    float4 uvOffset;     // (0, 0, 0, 0)
+    float4 chromaOffset; // half-UV-texel chroma-siting correction
+    float4 coeffR;       // R = lumaScale*Y + crR*V
+    float4 coeffG;       // G = lumaScale*Y - cbG*U - crG*V
+    float4 coeffB;       // B = lumaScale*Y + cbB*U
+};
+
+struct PS_INPUT {
+    float2 uv : TEXCOORD0;
+};
+
+float4 main(PS_INPUT input) : S_TARGET_OUTPUT0 {
+    // Sample luma at the interpolated UV.
+    float y = texY.Sample(smpY, input.uv).r;
+
+    // Compute the 4:2:0 chroma coordinate for this pixel. The UV plane is
+    // half the Y resolution in each axis. uvScale maps the full UV plane;
+    // chromaOffset applies the half-UV-texel chroma-siting correction.
+    float2 uvCoord = input.uv * uvScale.xy + uvOffset.xy + chromaOffset.xy;
+    float2 uv = texUV.Sample(smpUV, uvCoord).rg;   // uv.r = U, uv.g = V
+
+    // Build the YUV vector and subtract the limited-range offsets.
+    float3 yuv = float3(y, uv.x, uv.y) - yuvOffset.xyz;
+
+    // BT.709 matrix (same coefficients as the CPU converter).
+    float r = dot(coeffR.xyz, yuv);
+    float g = dot(coeffG.xyz, yuv);
+    float b = dot(coeffB.xyz, yuv);
+
+    // Clamp to [0,1] (the render target is UNORM, so 0..1 maps to 0..255).
+    r = saturate(r);
+    g = saturate(g);
+    b = saturate(b);
+
+    // Output RGBA byte order (byte 0 = R, byte 1 = G, byte 2 = B, byte 3 = A)
+    // to match the A8B8G8R8_SRGB framebuffer and the CPU converter.
+    return float4(r, g, b, 1.0);
+}

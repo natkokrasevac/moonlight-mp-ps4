@@ -77,6 +77,9 @@ struct StreamStatisticsSnapshot {
     float bitrateMbps = 0.0f;      ///< Measured encoded-video bitrate (Mbps, interval).
     float rttMs = 0.0f;            ///< Estimated host round-trip time (ms).
     float jitterMs = 0.0f;         ///< Estimated RTT variance / jitter (ms).
+    float frameDecodeMs = 0.0f;    ///< Decode time of the most-recent presented frame (ms).
+    float framePresentMs = 0.0f;   ///< NV12 conversion + overlay blend time (ms).
+    float frameTotalMs = 0.0f;     ///< Total frame time = decode + presentation (ms).
 };
 
 } // namespace ml

@@ -83,6 +83,7 @@ class UiBlitter;
 class SysmoduleManager;
 class UiSoundManager;
 class ImeDialog;
+class GpuVideoRenderer;
 }
 
 // Forward declaration of the UI manager and its intent type.
@@ -256,8 +257,21 @@ private:
     /// CPU UI compositor. Owned by MoonlightApp.
     std::unique_ptr<ps4::UiCompositor> m_uiCompositor;
 
+    /// Dedicated CPU compositor for the in-stream overlay layer. Owned by
+    /// MoonlightApp. Holds ONLY the current in-stream overlay pixels
+    /// (transparent elsewhere), so the overlay is never blended over stale CPU
+    /// UI content. Re-rendered only when the overlay content changes; the
+    /// cached region is re-blended over the fresh video each frame.
+    std::unique_ptr<ps4::UiCompositor> m_overlayCompositor;
+
     /// Dedicated GPU UI blitter. Owned by MoonlightApp.
     std::unique_ptr<ps4::UiBlitter> m_uiBlitter;
+
+    /// GPU NV12→BGRA fullscreen video pass. Owned by MoonlightApp.
+    /// Converts decoded Videodec2 NV12 frames into the WC_GARLIC VideoOut
+    /// framebuffer entirely on the GPU (fullscreen VS+PS draw). Initialized at
+    /// stream connect and released at stream stop.
+    std::unique_ptr<ps4::GpuVideoRenderer> m_gpuVideoRenderer;
 
     /// CPU Boot screen renderer. Owned by MoonlightApp.
     std::unique_ptr<ui::BootRenderer> m_bootRenderer;
@@ -548,6 +562,34 @@ private:
     /// line is emitted at most once per stream launch.
     bool m_streamStatsOverlayLogged = false;
 
+    // --- In-stream overlay caching (persistent overlay layer) ---------------
+    // The in-stream overlay (exit hint / statistics / mouse-emulation) is
+    // rendered into the CPU compositor surface and alpha-blended over the
+    // decoded video each frame. Re-rendering the overlay every frame (text
+    // layout, glyph rasterization, panel fill) is expensive (~23 ms for the
+    // exit hint) and can push present time over the 16 ms frame budget. To
+    // avoid this, the overlay is re-rendered ONLY when its content changes;
+    // otherwise the cached compositor region is re-blended over the fresh
+    // video (cheap). The overlay content changes when the active overlay
+    // screen changes, the exit hint visibility/button assignment changes, the
+    // statistics snapshot changes (~1/sec), or the mouse-emulation overlay
+    // toggles. These cached states drive that change detection.
+    bool m_overlayValid = false;   ///< Whether the cached overlay states are valid.
+    ui::UiScreen m_prevOverlayScreen = ui::UiScreen::StreamEmpty;
+    ui::StreamExitHintRenderState m_prevOverlayHint;
+    ui::StreamStatisticsRenderState m_prevOverlayStats;
+    ui::MouseEmulationRenderState m_prevOverlayMouse;
+
+    /// Whether an in-stream overlay is currently active (any overlay pixels
+    /// present in m_overlayCompositor). When false, the GPU video pass renders
+    /// video only (no overlay blend). Set by prepareStreamOverlay().
+    bool m_overlayActive = false;
+    /// Whether the overlay staging buffer in GpuVideoRenderer holds the current
+    /// overlay content. Set true after stageOverlay() on an overlay change;
+    /// reset on stream teardown. When true, presentStreamVideoFrame() blends
+    /// the staged overlay over the video in one submission.
+    bool m_overlayStaged = false;
+
     /// The mouse emulation state observed on the previous frame. Used to
     /// detect a rising/falling edge (toggle) of mouse emulation in-stream and
     /// drive the transient mouse emulation state overlay. Reset on stream
@@ -574,7 +616,28 @@ private:
     };
     StreamSlotRef m_streamSlotRefs[2];  ///< Matches GfxManager double buffering.
 
+    // --- Stream frame timing instrumentation (diagnostic) ------------------
+    // Per-frame timestamps captured across render()/present() to diagnose the
+    // residual 60fps stutter. Only meaningful while a stream is active and a
+    // frame was presented. Guarded by kLogStreamFrameTiming in MoonlightApp.cpp.
+    uint64_t m_timingRenderStartUs = 0;   ///< Just before beginFrame() (vsync wait entry).
+    uint64_t m_timingVsyncWakeUs = 0;     ///< Just after beginFrame() returns (t0).
+    uint64_t m_timingConvertStartUs = 0;  ///< Start of NV12→RGBA conversion.
+    uint64_t m_timingConvertEndUs = 0;    ///< End of conversion+blit+overlay.
+    uint64_t m_timingFlipSubmitUs = 0;    ///< Flip submitted (t3).
+    uint64_t m_timingPrevFlipUs = 0;      ///< Previous frame's flip submit time.
+    uint64_t m_timingFrameNumber = 0;     ///< Presented frame number this frame.
+    uint64_t m_timingFramePtsUs = 0;      ///< Presented frame presentationTimeUs.
+    uint64_t m_timingPrevFrameNumber = 0; ///< Previous presented frame number.
+    uint64_t m_timingPrevFramePtsUs = 0;  ///< Previous presented frame pts.
+    bool m_timingHavePrev = false;        ///< Whether a previous frame was logged.
+    bool m_timingFramePresented = false;  ///< Whether a frame was presented this frame.
+
     // --- Stream statistics overlay state ------------------------------------
+    /// Statistics snapshot refresh cadence (µs). A variable so it can be tuned
+    /// at runtime (default 0.5 s). The overlay re-renders when the snapshot
+    /// changes, so this bounds how often the displayed numbers update.
+    uint64_t m_streamStatsIntervalUs = 500000ull;
     /// Monotonic deadline (µs) for the next statistics snapshot update.
     /// 0 forces an immediate snapshot on the next update (used on stream
     /// connect so the first snapshot is captured immediately).
@@ -587,6 +650,12 @@ private:
     uint64_t m_streamStatsPrevDecodeTotalUs = 0;
     uint64_t m_streamStatsPrevDecodeCount = 0;
     uint64_t m_streamStatsPrevRxBytes = 0;
+    /// Decode time (µs) of the most-recent presented frame. Captured in
+    /// presentStreamVideoFrame() from the held frame's decodeTimeUs().
+    uint64_t m_latestFrameDecodeUs = 0;
+    /// Presentation time (µs) = NV12 conversion + overlay blend of the
+    /// most-recent presented frame. Captured in render().
+    uint64_t m_latestFramePresentUs = 0;
 
     // --- Application Quit state ---------------------------------------------
     /// The current quit's HostId (0 = none).
@@ -872,23 +941,30 @@ private:
     void handleAudioDecodeOutputUpdate(const ml::AudioDecodeOutputUpdate& update);
 
     /// Present the latest decoded video frame into the current GfxManager
-    /// framebuffer. Converts NV12→BGRA on the CPU. Called from render() while
-    /// the stream is active. Returns true if a frame was presented.
+    /// framebuffer. Converts NV12→BGRA entirely on the GPU (fullscreen VS+PS
+    /// draw) into the current framebuffer. Called from render() while the
+    /// stream is active. Returns true if a frame was presented.
     bool presentStreamVideoFrame();
 
-    /// Compose the in-stream overlay (exit hint / statistics) over the decoded
-    /// video already in the current framebuffer. Called from render() while
-    /// the stream is active, after presentStreamVideoFrame(). Draws the active
-    /// overlay into the CPU compositor surface (transparent background) and
-    /// alpha-blends it over the framebuffer, preserving the underlying video.
-    /// No-op when no overlay is active (StreamEmpty).
-    void composeStreamOverlay();
+    /// Emit a per-frame stream timing diagnostic line (vsync-wait stall,
+    /// conversion+overlay duration, inter-presentation interval, and
+    /// presented-frame deltas). Guarded by kLogStreamFrameTiming. Called from
+    /// present() after a frame is flipped while streaming.
+    void logStreamFrameTiming();
 
-    /// Clear a region of the CPU compositor surface to fully transparent.
-    /// Used before drawing an in-stream overlay so the compositor region holds
-    /// only the freshly drawn overlay pixels (no stale content from a previous
-    /// overlay or the CPU UI).
-    void clearCompositorRegion(const ps4::Rect& rect);
+    /// Prepare the in-stream overlay for GPU blending. Called from render()
+    /// while the stream is active, BEFORE presentStreamVideoFrame(). Detects
+    /// whether the overlay content changed; on a change it re-renders the
+    /// active overlay into the CPU overlay compositor and copies it into the
+    /// GPU renderer's WC_GARLIC staging buffer (stageOverlay). Sets
+    /// m_overlayActive / m_overlayStaged. The staged overlay is then blended
+    /// over the video by presentStreamVideoFrame() in a single submission.
+    void prepareStreamOverlay();
+
+    /// Reset the in-stream overlay cache so the next prepareStreamOverlay()
+    /// re-renders the overlay from scratch. Called on stream connect (so the
+    /// first overlay frame is rendered) and on stream teardown.
+    void resetStreamOverlayCache();
 
     /// Update the in-stream statistics display snapshot once per second while
     /// a stream is active and statistics are enabled. Reads cumulative

@@ -91,7 +91,7 @@ ps4::Rect StreamStatisticsRenderer::bounds() const {
     // The statistics panel is at the top-left with a safe screen inset. The
     // panel background is drawn with a 10px outward margin around the content
     // area.
-    const int rowCount = 6;
+    const int rowCount = 8;
     const int contentH = static_cast<int>(padding() * 2.0f + rowCount * rowHeight());
     const int x = static_cast<int>(panelX()) - 10;
     const int y = static_cast<int>(panelY()) - 10;
@@ -143,14 +143,16 @@ void StreamStatisticsRenderer::render(const StreamStatisticsRenderState& state,
     comp.fillRect(panel.x, panel.y, panel.w, panel.h, 0, 0, 0, UiTheme::kDimAlpha);
 
     // --- Statistics rows. ---------------------------------------------------
-    // Row order: Resolution, FPS, Bitrate, Decode, RTT (network latency),
-    // Jitter.
+    // Row order: Resolution, FPS, Bitrate, Network, Jitter, Frame Decoding,
+    // Frame Presentation, Time per Frame.
     drawRow(UiStrings::kStatResolution, state.resolution, 0, rowTop(0), comp);
     drawRow(UiStrings::kStatFps, state.fps, 1, rowTop(1), comp);
     drawRow(UiStrings::kStatBitrate, state.bitrate, 2, rowTop(2), comp);
-    drawRow(UiStrings::kStatDecode, state.decodeTime, 3, rowTop(3), comp);
-    drawRow(UiStrings::kStatNetwork, state.networkLatency, 4, rowTop(4), comp);
-    drawRow(UiStrings::kStatJitter, state.jitter, 5, rowTop(5), comp);
+    drawRow(UiStrings::kStatNetwork, state.networkLatency, 3, rowTop(3), comp);
+    drawRow(UiStrings::kStatJitter, state.jitter, 4, rowTop(4), comp);
+    drawRow(UiStrings::kStatFrameDecode, state.frameDecodeTime, 5, rowTop(5), comp);
+    drawRow(UiStrings::kStatFramePresent, state.framePresentTime, 6, rowTop(6), comp);
+    drawRow(UiStrings::kStatFrameTotal, state.frameTotalTime, 7, rowTop(7), comp);
 }
 
 void StreamStatisticsRenderer::renderRegion(const StreamStatisticsRenderState& state,
@@ -189,13 +191,15 @@ void StreamStatisticsRenderer::renderRegion(const StreamStatisticsRenderState& s
     }
 
     // Redraw every row that intersects the dirty region.
-    const char* labels[6] = {UiStrings::kStatResolution, UiStrings::kStatFps,
-                             UiStrings::kStatBitrate, UiStrings::kStatDecode,
-                             UiStrings::kStatNetwork, UiStrings::kStatJitter};
-    const std::string* values[6] = {&state.resolution, &state.fps,
-                                    &state.bitrate, &state.decodeTime,
-                                    &state.networkLatency, &state.jitter};
-    for (int i = 0; i < 6; ++i) {
+    const char* labels[8] = {UiStrings::kStatResolution, UiStrings::kStatFps,
+                             UiStrings::kStatBitrate, UiStrings::kStatNetwork,
+                             UiStrings::kStatJitter, UiStrings::kStatFrameDecode,
+                             UiStrings::kStatFramePresent, UiStrings::kStatFrameTotal};
+    const std::string* values[8] = {&state.resolution, &state.fps,
+                                    &state.bitrate, &state.networkLatency,
+                                    &state.jitter, &state.frameDecodeTime,
+                                    &state.framePresentTime, &state.frameTotalTime};
+    for (int i = 0; i < 8; ++i) {
         if (rectsIntersect(dirty, rowBounds(i))) {
             drawRow(labels[i], *values[i], i, rowTop(i), comp);
         }
@@ -216,19 +220,19 @@ void StreamStatisticsRenderer::drawRow(const char* label,
     }
 
     float baselineY = 0.0f, lineHeight = 0.0f;
-    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Regular,
+    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::BoldSmall,
                                  baselineY, lineHeight);
     const float textBaseline = rowY + (rowHeight() - lineHeight) * 0.5f +
                                baselineY;
 
     // Label (left-aligned within the panel).
-    comp.drawText(ps4::FontRasterizer::FontFace::Regular, label,
+    comp.drawText(ps4::FontRasterizer::FontFace::BoldSmall, label,
                   contentX(), textBaseline, UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
 
     // Value (right-aligned within the panel). An empty value renders as "N/A"
     // rather than a misleading zero.
     const std::string display = value.empty() ? std::string("N/A") : value;
-    drawRightAlignedText(comp, *m_fonts, ps4::FontRasterizer::FontFace::Regular,
+    drawRightAlignedText(comp, *m_fonts, ps4::FontRasterizer::FontFace::BoldSmall,
                          display.c_str(), panelX() + panelW() - 10.0f,
                          textBaseline, UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
 }

@@ -16,6 +16,12 @@ Windows will be added when time allows.
 - OpenOrbis SDK  
 (tested with 0.5.4 non-docker)
 
+- opengnm  
+(tested with commit 4b295ca)
+
+- OPTIONAL: opengnm-psbc shader compiler  
+only needed for custom shaders. compiled shaders are included with source code.
+
 - LLVM / LLD / Clang  
 (tested with clang 22.1.8; `cmake/toolchain-ps4-linux.cmake` references clang-18)
 
@@ -39,6 +45,19 @@ macOS:
 	
 	`export PATH=$PATH:$OO_PS4_TOOLCHAIN/bin/macos`
 
+	then reload your shell config:
+
+    `source ~/.zshrc`
+
+- compile opengnm with OpenOrbis Toolchain
+
+	inside the `opengnm` directory:  
+	`cp config.orbis.mak config.mak`  
+	`make`  
+	`make install DESTDIR=$OO_PS4_TOOLCHAIN`
+
+	this will install opengnm libraries in $OO_PS4_TOOLCHAIN/include/opengnm
+	you need to manually copy the libopengnm.a file to $OO_PS4_TOOLCHAIN/lib
 
 Linux (Debian shown, adapt for other distros):
 
@@ -56,6 +75,16 @@ Linux (Debian shown, adapt for other distros):
     then reload your shell config:
 
     `source ~/.bashrc`
+
+- compile opengnm with OpenOrbis Toolchain
+
+	inside the `opengnm` directory:  
+	`cp config.orbis.mak config.mak`  
+	`make`  
+	`make install DESTDIR=$OO_PS4_TOOLCHAIN`
+
+	this will install opengnm libraries in $OO_PS4_TOOLCHAIN/include/opengnm
+	you need to manually copy the libopengnm.a file to $OO_PS4_TOOLCHAIN/lib
 
 Windows:
 
@@ -95,7 +124,7 @@ in `src/moonlight/StreamSessionManager.cpp`
 
 ### Building
 
-`Makefile` is a wrapper around `Cmake` and packaging scripts. It should work without modification if environment variable is set. If compiler paths are not correct, edit `cmake/toolchain-ps4-[macos/linux].cmake`
+`Makefile` is a wrapper around `CMake` and packaging scripts. It should work without modification if environment variable is set. If compiler paths are not correct, edit `cmake/toolchain-ps4-[macos/linux].cmake`
 
 to build:
 
@@ -105,7 +134,6 @@ This will compile the .elf, create the eboot.bin, pkg.gp4, and the .pkg file.
 `make ftp`
 This will build the pkg as in `make` and upload it to the console via ftp.  
 The console IP address and Port [default is 2121] can be configured in `config/config_ftp`
-
 
 `make clean`  
 for cleaning all build files

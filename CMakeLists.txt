@@ -158,11 +158,22 @@ add_executable(${PROJECT_NAME}.elf ${CLIENT_SRC})
 # every translation unit (including the new threaded DiscoveryManager).
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE _GNU_SOURCE)
 
+# GPU video renderer production path.
+# renderFrame() uses the real video_p.sb NV12→BGRA shader and binds the decoded
+# Videodec2 NV12 planes (Onion WB, GPU-readable) directly as textures — no
+# intermediate copy.
+#
+# GPU in-stream overlay (Stage 2): the real overlay compositor content is
+# staged into a WC_GARLIC buffer on change and GPU-blended over the video in a
+# single submission (renderFrameWithOverlay). No test macro is defined; the
+# production path is active.
+
 target_link_libraries(${PROJECT_NAME}.elf
     moonlight-common-c
     mbedtls_ps4
     opus
     h264bitstream
+    opengnm
     SceVideoOut
     SceGnmDriver
     SceUserService
@@ -193,5 +204,6 @@ target_include_directories(${PROJECT_NAME}.elf PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h264bitstream
     ${OO_TOOLCHAIN}/include
+    ${OO_TOOLCHAIN}/include/opengnm
 )
 

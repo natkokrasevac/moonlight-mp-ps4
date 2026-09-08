@@ -57,6 +57,9 @@ struct StreamStatisticsRenderState {
     std::string decodeTime;      ///< e.g. "3.2".
     std::string networkLatency;  ///< e.g. "8.0".
     std::string jitter;          ///< e.g. "1.5".
+    std::string frameDecodeTime; ///< Frame Decoding, e.g. "3.2 ms".
+    std::string framePresentTime;///< Frame Presentation, e.g. "1.8 ms".
+    std::string frameTotalTime;  ///< Time per Frame, e.g. "5.0 ms".
 };
 
 // ---------------------------------------------------------------------------

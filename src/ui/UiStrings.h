@@ -155,21 +155,27 @@ constexpr const char* kAppName = "Moonlight DX for PlayStation 4";
 /// Version label (Settings footer). Used by the Settings panel footer.
 constexpr const char* kVersionLabel = "fourletterworkshop.com";
 /// Version number (Settings footer). Used by the Settings panel footer.
-constexpr const char* kVersionNumber = "1.0.0";
+constexpr const char* kVersionNumber = "1.11";
 
 // --- Stream statistics row labels ------------------------------------------
 /// Resolution (statistics row label). Used by the StreamStatistics overlay.
-constexpr const char* kStatResolution = "Resolution";
+constexpr const char* kStatResolution = "Stream Resolution";
 /// FPS (statistics row label). Used by the StreamStatistics overlay.
-constexpr const char* kStatFps = "FPS";
+constexpr const char* kStatFps = "Stream FPS";
 /// Bitrate (statistics row label). Used by the StreamStatistics overlay.
-constexpr const char* kStatBitrate = "Bitrate";
+constexpr const char* kStatBitrate = "Stream Bitrate";
 /// Decode (statistics row label). Used by the StreamStatistics overlay.
 constexpr const char* kStatDecode = "Decode";
 /// Network (statistics row label). Used by the StreamStatistics overlay.
 constexpr const char* kStatNetwork = "Network";
 /// Jitter (statistics row label). Used by the StreamStatistics overlay.
 constexpr const char* kStatJitter = "Jitter";
+/// Frame Decoding (statistics row label). Used by the StreamStatistics overlay.
+constexpr const char* kStatFrameDecode = "Frame Decoding";
+/// Frame Presentation (statistics row label). Used by the StreamStatistics overlay.
+constexpr const char* kStatFramePresent = "Frame Presentation";
+/// Time per Frame (statistics row label). Used by the StreamStatistics overlay.
+constexpr const char* kStatFrameTotal = "Time per Frame";
 
 } // namespace UiStrings
 

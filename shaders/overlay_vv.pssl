@@ -1,0 +1,38 @@
+// PSSL vertex shader — fullscreen overlay blend pass.
+//
+// Draws a fullscreen triangle covering the whole viewport, sampling the cached
+// in-stream overlay texture (a full 1920x1080 RGBA8 surface, transparent except
+// where an overlay panel is drawn). The pixel shader outputs the sampled RGBA;
+// the GPU blend unit composites it over the video already in the framebuffer.
+//
+// Orientation: the overlay CPU surface is top-down (row 0 = top), matching the
+// framebuffer. With the positive-Y viewport, clip-space y = -1 maps to the top
+// row, so V = 0 at the top and V = 1 at the bottom (no flip). This is the same
+// orientation as the corrected video_vv.pssl.
+
+struct VS_OUTPUT {
+    float4 pos : S_POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VS_OUTPUT main(uint id : S_VERTEX_ID) {
+    VS_OUTPUT o;
+
+    // Fullscreen triangle (covers the whole viewport).
+    float2 pos;
+    float2 uv;
+    if (id == 0) {
+        pos = float2(-1.0, -1.0);
+        uv  = float2(0.0, 0.0);
+    } else if (id == 1) {
+        pos = float2(3.0, -1.0);
+        uv  = float2(2.0, 0.0);
+    } else {
+        pos = float2(-1.0, 3.0);
+        uv  = float2(0.0, 2.0);
+    }
+
+    o.pos = float4(pos, 0.0, 1.0);
+    o.uv  = uv;
+    return o;
+}

@@ -209,6 +209,16 @@ public:
     /// Frame number from the source EncodedVideoUnit.
     uint64_t frameNumber() const;
 
+    /// Presentation time (µs) from the source EncodedVideoUnit, with the
+    /// epoch at the first captured frame (host timeline). Used for frame
+    /// pacing diagnostics. Returns 0 if unavailable.
+    uint64_t presentationTimeUs() const;
+
+    /// Decode time (µs) measured for this frame's hardware decode call on the
+    /// decoder worker thread. Used by the in-stream statistics overlay to
+    /// report the per-frame decode time. Returns 0 if unavailable.
+    uint64_t decodeTimeUs() const;
+
     /// Visible width (pixels).
     uint32_t width() const;
 

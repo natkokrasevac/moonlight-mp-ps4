@@ -46,7 +46,7 @@
 #include "platform/ps4/UiSoundManager.h"   // UI navigation sound manager.
 #include "platform/ps4/SysmoduleManager.h" // PS4 sysmodule lifecycle owner.
 #include "platform/ps4/ImeDialog.h"        // PS4 system on-screen keyboard.
-#include "platform/ps4/Nv12Converter.h"    // NV12→BGRA CPU conversion.
+#include "platform/ps4/GpuVideoRenderer.h" // GPU NV12→BGRA fullscreen video pass.
 
 // --- Moonlight-specific host discovery subsystem, host registry, HTTP, and ---
 // --- serverinfo query subsystem ----------------------------------------------
@@ -84,7 +84,8 @@
 // --- OpenOrbis SDK headers (private to this translation unit) -----------------------
 #include <orbis/libkernel.h>   // sceKernelGetProcessTime
 
-#include <emmintrin.h>   // SSE2 — Jaguar PS4 (fast NV12→BGRA)
+#include <atomic>
+#include <pthread.h>
 
 #include <cstdio>         // printf, fflush, snprintf
 #include <cstring>        // memset
@@ -132,11 +133,6 @@ static constexpr uint64_t kAppListPollIntervalUs = 1000000ull;
 /// occupy the ServerInfoManager worker for tens of seconds.
 static constexpr uint32_t kPairedHostProbeTimeoutMs = 1500;
 
-/// In-stream statistics snapshot refresh interval (microseconds).
-/// The statistics overlay is refreshed at a bounded ~1 Hz cadence; network
-/// stats are sampled from the main thread at this cadence, not per draw.
-static constexpr uint64_t kStreamStatsIntervalUs = 1000000ull;
-
 /// Diagnostic verbosity: log the per-request serverinfo "applied" line.
 /// Default OFF to keep the klog quiet during normal operation.
 static constexpr bool kLogServerInfoApplied = false;
@@ -148,6 +144,13 @@ static constexpr bool kLogReconciledPairing = false;
 /// Diagnostic verbosity: log the periodic frame counter line.
 /// Default OFF to keep the klog quiet during normal operation.
 static constexpr bool kLogFrameCounter = false;
+
+/// Diagnostic verbosity: log the per-frame stream timing line (vsync-wait
+/// stall, conversion+blit+overlay duration, inter-presentation interval, and
+/// presented-frame deltas). This is the instrumentation used to confirm the
+/// frame-pacing / phase-jitter hypothesis for the residual 60fps stutter.
+/// Default OFF; the per-worker [convert-diag] line is the active diagnostic.
+static constexpr bool kLogStreamFrameTiming = false;
 
 // ---------------------------------------------------------------------------
 // Diagnostics helper (minimal; not a speculative logging subsystem)
@@ -176,7 +179,9 @@ MoonlightApp::MoonlightApp()
     , m_input(new ps4::InputManager())
     , m_fontRasterizer(new ps4::FontRasterizer())
     , m_uiCompositor(new ps4::UiCompositor())
+    , m_overlayCompositor(new ps4::UiCompositor())
     , m_uiBlitter(new ps4::UiBlitter())
+    , m_gpuVideoRenderer(new ps4::GpuVideoRenderer())
     , m_bootRenderer(new ui::BootRenderer())
     , m_hostListRenderer(new ui::HostListRenderer())
     , m_hostGridRenderer(new ui::HostGridRenderer())
@@ -436,6 +441,24 @@ AppResult MoonlightApp::initialize() {
                  m_uiCompositor->pitch());
         diagPrint(buf);
     }
+
+    // 5b. Create and initialize the dedicated in-stream overlay compositor.
+    //     This holds ONLY the current overlay pixels (transparent elsewhere),
+    //     so the overlay is never blended over stale CPU UI content. It is
+    //     memset to transparent here; composeStreamOverlay() re-renders into it
+    //     only when the overlay content changes.
+    if (!m_overlayCompositor->initialize(kWidth, kHeight, m_fontRasterizer.get())) {
+        diagPrint("[app] OverlayCompositor initialize failed");
+        transitionTo(LifecycleState::Stopping);
+        transitionTo(LifecycleState::ShutDown);
+        return AppResult(AppResultCategory::InitializationFailure);
+    }
+    // Clear the overlay compositor to fully transparent (RGBA 0,0,0,0). The
+    // UiCompositor::clear() with alpha 0 is a no-op (it blends), so memset the
+    // surface directly.
+    memset(m_overlayCompositor->pixelsWritable(), 0,
+           static_cast<size_t>(m_overlayCompositor->width()) *
+               m_overlayCompositor->height() * 4u);
 
     // 6. Initialize the UiBlitter.
     ps4::GfxResult blitInit = m_uiBlitter->initialize(m_gfx.get());
@@ -1000,6 +1023,11 @@ void MoonlightApp::shutdown() {
     for (auto& ref : m_streamSlotRefs) {
         ref.valid = false;
     }
+    // Release the GPU NV12→BGRA fullscreen video pass resources (final safety
+    // net; the stream terminal handlers normally release them first).
+    if (m_gpuVideoRenderer) {
+        m_gpuVideoRenderer->shutdown();
+    }
 
     // AudioDecodeOutput is shut down before StreamSessionManager (it must
     // stop consuming encoded audio before the stream connection is torn
@@ -1178,6 +1206,9 @@ void MoonlightApp::shutdown() {
     }
     if (m_uiBlitter) {
         m_uiBlitter->shutdown();
+    }
+    if (m_overlayCompositor) {
+        m_overlayCompositor->shutdown();
     }
     if (m_uiCompositor) {
         m_uiCompositor->shutdown();
@@ -1841,6 +1872,9 @@ void MoonlightApp::render() {
     }
 
     // Acquire and prepare the next writable frame.
+    // Instrumentation: record the vsync-wait entry time so the stall inside
+    // beginFrame() (the flip-wait) can be measured.
+    m_timingRenderStartUs = sceKernelGetProcessTime();
     ps4::GfxResult beginResult = m_gfx->beginFrame();
     if (!beginResult.succeeded()) {
         char buf[128];
@@ -1851,12 +1885,20 @@ void MoonlightApp::render() {
         requestExit(ExitReason::RuntimeFailure);
         return;
     }
+    // Instrumentation: beginFrame() returned — the vsync flip-wait is over.
+    m_timingVsyncWakeUs = sceKernelGetProcessTime();
+    m_timingFramePresented = false;
 
     // --- Stream presentation path -------------------------------------------
     // While a stream is active, the main thread presents decoded video frames
     // directly into the GfxManager framebuffer, bypassing the CPU UI
     // compositor. The CPU UI compositor is suppressed during streaming.
     if (m_streamActive) {
+        // Prepare the in-stream overlay BEFORE presenting: detect changes,
+        // re-render into the CPU overlay compositor, and stage it into the GPU
+        // renderer's WC_GARLIC buffer. presentStreamVideoFrame() then blends
+        // the staged overlay over the video in a single submission.
+        prepareStreamOverlay();
         bool presented = presentStreamVideoFrame();
         if (!presented) {
             // No decoded frame available yet — clear to black. The in-stream
@@ -1865,10 +1907,17 @@ void MoonlightApp::render() {
             // (video-less) framebuffer, which would otherwise flicker.
             m_gfx->clear(0xFF000000u);
         } else {
-            // A real video frame is in the framebuffer. Compose the in-stream
-            // overlay (exit hint / statistics) over it. This preserves the
-            // video and never mutates the retained decode image.
-            composeStreamOverlay();
+            // A real video frame is in the framebuffer. The in-stream overlay
+            // was already GPU-blended over it by presentStreamVideoFrame()
+            // (single submission). No CPU overlay blend is needed — the GPU
+            // renderer is the only video path.
+            // Instrumentation: conversion + overlay are complete.
+            m_timingConvertEndUs = sceKernelGetProcessTime();
+            // Record the presentation time (NV12 conversion + overlay blend)
+            // of the presented frame for the in-stream statistics overlay
+            // ("Frame Presentation" row).
+            m_latestFramePresentUs =
+                m_timingConvertEndUs - m_timingConvertStartUs;
         }
         return;
     }
@@ -2722,6 +2771,70 @@ void MoonlightApp::present() {
         requestExit(ExitReason::RuntimeFailure);
         return;
     }
+
+    // Instrumentation: the flip was submitted. If a stream frame was presented
+    // this frame, emit the per-frame timing diagnostic.
+    m_timingFlipSubmitUs = sceKernelGetProcessTime();
+    if (m_streamActive && m_timingFramePresented) {
+        logStreamFrameTiming();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream frame timing instrumentation
+// ---------------------------------------------------------------------------
+
+/// Emit a per-frame stream timing diagnostic line. This is the instrumentation
+/// used to confirm the frame-pacing / phase-jitter hypothesis for the residual
+/// 60fps stutter. It reports, for the frame just flipped:
+///
+///   vsyncWaitUs  — time blocked in beginFrame() waiting for the previous
+///                  frame's flip to complete (the vsync flip-wait stall).
+///   convUs       — conversion + blit + overlay duration (main-thread work
+///                  between the vsync wake and the flip submission).
+///   flipGapUs    — time since the previous frame's flip submission (the
+///                  inter-presentation interval; ideal ~16667 µs at 60 Hz).
+///   dFrame       — presented frame-number delta vs. the previous presented
+///                  frame (1 = every frame shown; 2 = a frame was skipped;
+///                  0 = a frame was repeated).
+///   dPtsUs       — delta of the presented frames' presentationTimeUs (the
+///                  host's encode cadence; ideal ~16667 µs).
+///
+/// Interpretation: if flipGapUs alternates between ~16667 and ~33333 (or shows
+/// wide scatter) while dFrame is sometimes 2 or 0, that confirms the client is
+/// not pacing presented frames to the host's encode cadence — the "show
+/// whatever is newest" cadence jitter described in the analysis.
+void MoonlightApp::logStreamFrameTiming() {
+    if (!kLogStreamFrameTiming) {
+        return;
+    }
+
+    const uint64_t vsyncWaitUs = m_timingVsyncWakeUs - m_timingRenderStartUs;
+    const uint64_t convUs = m_timingConvertEndUs - m_timingConvertStartUs;
+    const uint64_t flipGapUs =
+        m_timingHavePrev ? (m_timingFlipSubmitUs - m_timingPrevFlipUs) : 0;
+    const uint64_t dFrame =
+        m_timingHavePrev ? (m_timingFrameNumber - m_timingPrevFrameNumber) : 0;
+    const uint64_t dPtsUs =
+        m_timingHavePrev ? (m_timingFramePtsUs - m_timingPrevFramePtsUs) : 0;
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "[stream-timing] frame=%llu vsyncWaitUs=%llu convUs=%llu "
+             "flipGapUs=%llu dFrame=%llu dPtsUs=%llu",
+             static_cast<unsigned long long>(m_timingFrameNumber),
+             static_cast<unsigned long long>(vsyncWaitUs),
+             static_cast<unsigned long long>(convUs),
+             static_cast<unsigned long long>(flipGapUs),
+             static_cast<unsigned long long>(dFrame),
+             static_cast<unsigned long long>(dPtsUs));
+    diagPrint(buf);
+
+    // Retain this frame's state as the baseline for the next frame.
+    m_timingPrevFlipUs = m_timingFlipSubmitUs;
+    m_timingPrevFrameNumber = m_timingFrameNumber;
+    m_timingPrevFramePtsUs = m_timingFramePtsUs;
+    m_timingHavePrev = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2729,8 +2842,9 @@ void MoonlightApp::present() {
 // ---------------------------------------------------------------------------
 
 /// Present the latest decoded video frame into the current GfxManager
-/// framebuffer. Converts NV12→BGRA on the CPU. Called from render() while
-/// the stream is active. Returns true if a frame was presented.
+/// framebuffer. Converts NV12→BGRA entirely on the GPU (fullscreen VS+PS draw)
+/// into the current framebuffer. Called from render() while the stream is
+/// active. Returns true if a frame was presented.
 ///
 /// Frame-lifetime management (Phase 3): the decoder must not reuse a surface
 /// that the renderer (or the decoder's DPB) may still reference. When a new
@@ -2802,16 +2916,73 @@ bool MoonlightApp::presentStreamVideoFrame() {
     const uint32_t fbW = m_gfx->getFramebufferWidth();
     const uint32_t fbH = m_gfx->getFramebufferHeight();
 
-    // Convert NV12 → BGRA into the framebuffer.
-    ps4::Nv12Converter::nv12ToBgra(
-        static_cast<uint8_t*>(fb), static_cast<int>(fbPitch),
-        static_cast<int>(fbW), static_cast<int>(fbH),
-        static_cast<const uint8_t*>(m_heldDecodedFrame.yPlane()),
-        static_cast<const uint8_t*>(m_heldDecodedFrame.uvPlane()),
-        static_cast<int>(m_heldDecodedFrame.pitch()),
-        static_cast<int>(m_heldDecodedFrame.pitch()),
-        static_cast<int>(m_heldDecodedFrame.width()),
-        static_cast<int>(m_heldDecodedFrame.height()));
+    // --- GPU NV12→BGRA fullscreen video pass --------------------------------
+    // Convert the decoded NV12 frame entirely on the GPU: bind the Y/UV planes
+    // as linear textures, draw a fullscreen triangle into the current
+    // framebuffer, and wait for the EOP so the GPU draw is fully complete
+    // before any CPU code (the UI overlay composition) writes into the same
+    // framebuffer. There is no CPU fallback on the console.
+    m_timingConvertStartUs = sceKernelGetProcessTime();
+    if (m_gpuVideoRenderer && m_gpuVideoRenderer->isInitialized()) {
+        ps4::GpuVideoFrame gvFrame;
+        gvFrame.yPlane = m_heldDecodedFrame.yPlane();
+        gvFrame.uvPlane = m_heldDecodedFrame.uvPlane();
+        gvFrame.width = m_heldDecodedFrame.width();
+        gvFrame.height = m_heldDecodedFrame.height();
+        gvFrame.surfaceHeight = m_heldDecodedFrame.surfaceHeight();
+        gvFrame.pitch = m_heldDecodedFrame.pitch();
+        gvFrame.colorSpace = m_heldDecodedFrame.colorSpace();
+        gvFrame.colorRange = m_heldDecodedFrame.colorRange();
+
+#ifdef GPU_OVERLAY_TEST1
+        // Stage 1 test (flicker-free): render the video AND blend a static
+        // semi-transparent test overlay over it in a SINGLE command-buffer
+        // submission. This isolates the GPU source-over overlay blend mechanism
+        // (texture sampling + blend state + RT compositing) from the
+        // Onion/CPU-overlay coherency question, and verifies the combined
+        // video+overlay path has no cross-submission read-after-write hazard.
+        ps4::GpuVideoResult gvr =
+            m_gpuVideoRenderer->renderFrameWithTestOverlay(gvFrame, fb, fbW, fbH);
+        if (!gvr.succeeded()) {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "[stream] GPU video+overlay render failed: category=%d",
+                     static_cast<int>(gvr.category));
+            diagPrint(buf);
+            return false;
+        }
+#else
+        // Stage 2: render the video AND blend the staged in-stream overlay
+        // (if active) over it in a SINGLE command-buffer submission. The
+        // overlay was staged into WC_GARLIC by prepareStreamOverlay() before
+        // this call. When no overlay is active, render video only.
+        ps4::GpuVideoResult gvr;
+        if (m_overlayActive && m_overlayStaged) {
+            void* staging = m_gpuVideoRenderer->overlayStaging();
+            if (staging) {
+                gvr = m_gpuVideoRenderer->renderFrameWithOverlay(
+                    gvFrame, staging, kWidth, kHeight, kWidth * 4u,
+                    fb, fbW, fbH);
+            } else {
+                gvr = m_gpuVideoRenderer->renderFrame(gvFrame, fb, fbW, fbH);
+            }
+        } else {
+            gvr = m_gpuVideoRenderer->renderFrame(gvFrame, fb, fbW, fbH);
+        }
+        if (!gvr.succeeded()) {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "[stream] GPU video render failed: category=%d",
+                     static_cast<int>(gvr.category));
+            diagPrint(buf);
+            return false;
+        }
+#endif
+    } else {
+        // The GPU video renderer must be initialized to present video.
+        diagPrint("[stream] GPU video renderer not initialized");
+        return false;
+    }
 
     // --- 4. Record which frame was drawn to this graphics slot --------------
     // Track the surface slot and its generation so a future frame can detect
@@ -2822,6 +2993,15 @@ bool MoonlightApp::presentStreamVideoFrame() {
     m_streamSlotRefs[frameSlot].generation =
         m_videoDecoder->surfaceGeneration(m_heldDecodedFrame.surfaceSlot());
     m_streamSlotRefs[frameSlot].valid = true;
+
+    // Instrumentation: record the presented frame's identity for the timing log.
+    m_timingFrameNumber = m_heldDecodedFrame.frameNumber();
+    m_timingFramePtsUs = m_heldDecodedFrame.presentationTimeUs();
+    m_timingFramePresented = true;
+
+    // Record the decode time of the presented frame for the in-stream
+    // statistics overlay ("Frame Decoding" row).
+    m_latestFrameDecodeUs = m_heldDecodedFrame.decodeTimeUs();
 
     // Diagnostic: log the first presented frame.
     if (!m_streamFirstFramePresented) {
@@ -2847,9 +3027,9 @@ bool MoonlightApp::presentStreamVideoFrame() {
 // In-stream overlay composition
 // ---------------------------------------------------------------------------
 
-/// Compose the in-stream overlay (exit hint / statistics) over the decoded
-/// video already in the current framebuffer. Called from render() while the
-/// stream is active, after presentStreamVideoFrame().
+/// Compose the in-stream overlay (exit hint / statistics / mouse-emulation)
+/// over the decoded video already in the current framebuffer. Called from
+/// render() while the stream is active, after presentStreamVideoFrame().
 ///
 /// Composition model: the overlay renderers draw into the CPU compositor
 /// surface (which is transparent except for the overlay pixels). The
@@ -2863,124 +3043,218 @@ bool MoonlightApp::presentStreamVideoFrame() {
 ///   StreamStatistics  → draw the statistics overlay.
 ///   StreamEmpty       → no overlay.
 ///
-/// Because the video is re-converted from the clean held frame each frame and
-/// the overlay is freshly blended, a static scene still reflects overlay
-/// timing changes (hint expiry, statistics value updates) without requiring a
-/// new decoded frame.
-void MoonlightApp::composeStreamOverlay() {
-    if (!m_ui || !m_ui->isInitialized() ||
-        !m_uiCompositor || !m_uiBlitter) {
+/// PERFORMANCE (persistent overlay layer): re-rendering the overlay every
+/// frame (text layout, glyph rasterization, panel fill) is expensive (~23 ms
+/// for the exit hint) and can push present time over the 16 ms frame budget.
+/// To avoid this, the overlay is re-rendered into the compositor ONLY when its
+/// content changes (the active overlay screen, the exit hint visibility/button
+/// assignment, the statistics snapshot ~1/sec, or the mouse-emulation overlay
+/// toggling). On unchanged frames the cached compositor region is simply
+/// re-blended over the fresh video (cheap). Because the video is re-converted
+/// from the clean held frame each frame and the cached overlay is re-blended
+/// each frame, a static scene still reflects overlay timing changes without
+/// requiring a new decoded frame or a per-frame overlay re-render.
+void MoonlightApp::prepareStreamOverlay() {
+    if (!m_ui || !m_ui->isInitialized() || !m_overlayCompositor) {
+        m_overlayActive = false;
         return;
     }
 
     const ui::UiScreen screen = m_ui->currentScreen();
 
+    // --- Build the current overlay render states ---------------------------
+    // The base overlay is the exit hint or the statistics panel (mutually
+    // exclusive, driven by the stream screen). The mouse-emulation overlay is
+    // a transient that can coexist on top of either base overlay (or appear
+    // alone over StreamEmpty).
+    bool baseActive = false;
+    ui::StreamExitHintRenderState hintState;
+    ui::StreamStatisticsRenderState statsState;
+    bool mouseActive = false;
+    ui::MouseEmulationRenderState mouseState;
+
     if (screen == ui::UiScreen::StreamExitHint) {
-        // --- Exit hint overlay ----------------------------------------------
-        ui::StreamExitHintRenderState hintState;
-        if (!m_ui->buildStreamExitHintRenderState(hintState)) {
-            return;
+        if (m_ui->buildStreamExitHintRenderState(hintState)) {
+            baseActive = true;
         }
-        if (!m_streamExitHintRenderer ||
-            !m_streamExitHintRenderer->isInitialized()) {
-            return;
-        }
-        // Clear the compositor's hint region to transparent, draw the hint,
-        // then alpha-blend the region over the framebuffer. The video is
-        // preserved wherever the compositor is transparent.
-        const ps4::Rect hintBounds =
-            m_streamExitHintRenderer->bounds();
-        clearCompositorRegion(hintBounds);
-        m_streamExitHintRenderer->render(hintState, *m_uiCompositor);
-        m_uiBlitter->blendOverFramebuffer(
-            m_uiCompositor->pixels(), m_uiCompositor->width(),
-            m_uiCompositor->height(), m_uiCompositor->pitch(), hintBounds);
     } else if (screen == ui::UiScreen::StreamStatistics) {
-        // --- Statistics overlay ---------------------------------------------
-        ui::StreamStatisticsRenderState statsState;
-        if (!m_ui->buildStreamStatisticsRenderState(statsState)) {
-            return;
-        }
-        if (!m_streamStatisticsRenderer ||
-            !m_streamStatisticsRenderer->isInitialized()) {
-            return;
-        }
-        // Clear the compositor's statistics region to transparent, draw the
-        // overlay, then alpha-blend the region over the framebuffer.
-        const ps4::Rect statsBounds = m_streamStatisticsRenderer->bounds();
-        clearCompositorRegion(statsBounds);
-        m_streamStatisticsRenderer->render(statsState, *m_uiCompositor);
-        m_uiBlitter->blendOverFramebuffer(
-            m_uiCompositor->pixels(), m_uiCompositor->width(),
-            m_uiCompositor->height(), m_uiCompositor->pitch(), statsBounds);
-        // Emit the "statistics overlay composed" diagnostic at most once per
-        // stream session (reset on stream connect).
-        if (!m_streamStatsOverlayLogged) {
-            m_streamStatsOverlayLogged = true;
-            diagPrint("[stream] statistics overlay composed");
+        if (m_ui->buildStreamStatisticsRenderState(statsState)) {
+            baseActive = true;
         }
     }
-    // StreamEmpty (or any other screen): no base overlay is drawn. The video
-    // is presented cleanly because the compositor is not blended over it.
+    if (m_ui->isMouseEmulationOverlayActive()) {
+        if (m_ui->buildMouseEmulationRenderState(mouseState)) {
+            mouseActive = true;
+        }
+    }
 
-    // --- Mouse emulation state overlay -------------------------------------
-    // The transient mouse emulation state overlay is drawn on top of whatever
-    // base stream overlay is active (exit hint, statistics, or empty). It is
-    // active only while the UiManager's overlay timer is running. When the
-    // statistics overlay is active, both remain visible until the mouse
-    // emulation overlay timer expires, then only the statistics overlay
-    // remains.
-    if (m_ui && m_ui->isInitialized() &&
-        m_ui->isMouseEmulationOverlayActive()) {
-        ui::MouseEmulationRenderState mouseState;
-        if (m_ui->buildMouseEmulationRenderState(mouseState) &&
-            m_mouseEmulationOverlayRenderer &&
-            m_mouseEmulationOverlayRenderer->isInitialized()) {
-            const ps4::Rect mouseBounds =
-                m_mouseEmulationOverlayRenderer->bounds();
-            clearCompositorRegion(mouseBounds);
-            m_mouseEmulationOverlayRenderer->render(mouseState, *m_uiCompositor);
-            m_uiBlitter->blendOverFramebuffer(
-                m_uiCompositor->pixels(), m_uiCompositor->width(),
-                m_uiCompositor->height(), m_uiCompositor->pitch(), mouseBounds);
+    // Track whether any overlay is active this frame.
+    m_overlayActive = baseActive || mouseActive;
+
+    // --- Detect whether the overlay content changed ------------------------
+    // The overlay must be re-rendered when any of its inputs change. Compare
+    // against the cached previous states. On the first call (m_overlayValid
+    // false) it is always re-rendered.
+    bool changed = !m_overlayValid;
+    if (screen != m_prevOverlayScreen) {
+        changed = true;
+    }
+    if (baseActive && screen == ui::UiScreen::StreamExitHint) {
+        if (hintState.visible != m_prevOverlayHint.visible ||
+            hintState.crossIsAccept != m_prevOverlayHint.crossIsAccept) {
+            changed = true;
+        }
+    }
+    if (baseActive && screen == ui::UiScreen::StreamStatistics) {
+        if (statsState.visible != m_prevOverlayStats.visible ||
+            statsState.resolution != m_prevOverlayStats.resolution ||
+            statsState.fps != m_prevOverlayStats.fps ||
+            statsState.bitrate != m_prevOverlayStats.bitrate ||
+            statsState.decodeTime != m_prevOverlayStats.decodeTime ||
+            statsState.networkLatency != m_prevOverlayStats.networkLatency ||
+            statsState.jitter != m_prevOverlayStats.jitter ||
+            statsState.frameDecodeTime != m_prevOverlayStats.frameDecodeTime ||
+            statsState.framePresentTime != m_prevOverlayStats.framePresentTime ||
+            statsState.frameTotalTime != m_prevOverlayStats.frameTotalTime) {
+            changed = true;
+        }
+    }
+    if (mouseActive) {
+        if (mouseState.visible != m_prevOverlayMouse.visible ||
+            mouseState.enabled != m_prevOverlayMouse.enabled) {
+            changed = true;
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "[overlay] mouse overlay active: visible=%d enabled=%d (re-render)",
+                     mouseState.visible ? 1 : 0, mouseState.enabled ? 1 : 0);
+            diagPrint(buf);
+        }
+    } else if (m_prevOverlayMouse.visible) {
+        // The mouse-emulation overlay disappeared.
+        changed = true;
+        diagPrint("[overlay] mouse overlay expired (re-render)");
+    }
+
+    // --- Re-render the overlay into the overlay compositor only on change ---
+    // The dedicated overlay compositor is the persistent overlay layer. On a
+    // change, clear the active overlay region(s) to fully transparent and
+    // redraw every active overlay (base + mouse). This is cheap because it
+    // only happens on change, not every frame. On unchanged frames the cached
+    // overlay content is kept.
+    //
+    // NOTE: UiCompositor::clear(0,0,0,0) is a no-op (alpha 0 blends and does
+    // not write), so the surface is memset to zero (transparent) directly.
+    if (changed) {
+        // Clear the union of the previous and current active overlay bounds so
+        // an overlay that disappeared or moved is fully erased. The overlay
+        // panels do not overlap, so clearing each active panel's bounds is
+        // sufficient and far cheaper than clearing the whole 1920x1080 surface.
+        uint8_t* overlayW = m_overlayCompositor->pixelsWritable();
+        const uint32_t opitch = m_overlayCompositor->pitch();
+        const uint32_t owidth = m_overlayCompositor->width();
+        const uint32_t oheight = m_overlayCompositor->height();
+
+        auto clearOverlayRegion = [&](const ps4::Rect& r) {
+            int x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > static_cast<int>(owidth)) x1 = static_cast<int>(owidth);
+            if (y1 > static_cast<int>(oheight)) y1 = static_cast<int>(oheight);
+            if (x1 <= x0 || y1 <= y0) return;
+            for (int yy = y0; yy < y1; ++yy) {
+                memset(overlayW + static_cast<size_t>(yy) * opitch +
+                           static_cast<size_t>(x0) * 4,
+                       0, static_cast<size_t>(x1 - x0) * 4);
+            }
+        };
+
+        // Clear the previous active overlay bounds (so a disappearing/moving
+        // overlay is erased) and the current active overlay bounds.
+        if (m_prevOverlayScreen == ui::UiScreen::StreamExitHint) {
+            clearOverlayRegion(m_streamExitHintRenderer->bounds());
+        } else if (m_prevOverlayScreen == ui::UiScreen::StreamStatistics) {
+            clearOverlayRegion(m_streamStatisticsRenderer->bounds());
+        }
+        if (m_prevOverlayMouse.visible) {
+            clearOverlayRegion(m_mouseEmulationOverlayRenderer->bounds());
+        }
+        if (baseActive && screen == ui::UiScreen::StreamExitHint) {
+            clearOverlayRegion(m_streamExitHintRenderer->bounds());
+        } else if (baseActive && screen == ui::UiScreen::StreamStatistics) {
+            clearOverlayRegion(m_streamStatisticsRenderer->bounds());
+        }
+        if (mouseActive) {
+            clearOverlayRegion(m_mouseEmulationOverlayRenderer->bounds());
+        }
+
+        if (baseActive && screen == ui::UiScreen::StreamExitHint) {
+            if (m_streamExitHintRenderer &&
+                m_streamExitHintRenderer->isInitialized()) {
+                m_streamExitHintRenderer->render(hintState, *m_overlayCompositor);
+            }
+        } else if (baseActive && screen == ui::UiScreen::StreamStatistics) {
+            if (m_streamStatisticsRenderer &&
+                m_streamStatisticsRenderer->isInitialized()) {
+                m_streamStatisticsRenderer->render(statsState, *m_overlayCompositor);
+            }
+            // Emit the "statistics overlay composed" diagnostic at most once
+            // per stream session (reset on stream connect).
+            if (!m_streamStatsOverlayLogged) {
+                m_streamStatsOverlayLogged = true;
+                diagPrint("[stream] statistics overlay composed");
+            }
+        }
+        if (mouseActive) {
+            if (m_mouseEmulationOverlayRenderer &&
+                m_mouseEmulationOverlayRenderer->isInitialized()) {
+                m_mouseEmulationOverlayRenderer->render(mouseState, *m_overlayCompositor);
+            }
+        }
+
+        // Cache the current states for the next frame's change detection.
+        m_prevOverlayScreen = screen;
+        m_prevOverlayHint = hintState;
+        m_prevOverlayStats = statsState;
+        m_prevOverlayMouse = mouseState;
+        m_overlayValid = true;
+
+        // --- Stage the freshly re-rendered overlay into WC_GARLIC ----------
+        // Copy the CPU overlay compositor (Onion) into the GPU renderer's
+        // persistent WC_GARLIC staging buffer and flush it, so the GPU can
+        // sample it in the video+overlay submission. This only happens on an
+        // overlay content change (rare), so the per-frame cost is zero.
+        if (m_gpuVideoRenderer && m_gpuVideoRenderer->isInitialized()) {
+            ps4::GpuVideoResult sr =
+                m_gpuVideoRenderer->stageOverlay(
+                    m_overlayCompositor->pixels(),
+                    m_overlayCompositor->width(),
+                    m_overlayCompositor->height(),
+                    m_overlayCompositor->pitch());
+            m_overlayStaged = sr.succeeded();
+            if (!m_overlayStaged) {
+                char buf[160];
+                snprintf(buf, sizeof(buf),
+                         "[overlay] GPU overlay stage failed: category=%d (CPU fallback)",
+                         static_cast<int>(sr.category));
+                diagPrint(buf);
+            }
+        } else {
+            m_overlayStaged = false;
         }
     }
 }
 
-/// Clear a region of the CPU compositor surface to fully transparent. Used
-/// before drawing an in-stream overlay so the compositor region holds only the
-/// freshly drawn overlay pixels (no stale content from a previous overlay or
-/// the CPU UI).
-void MoonlightApp::clearCompositorRegion(const ps4::Rect& rect) {
-    if (!m_uiCompositor) {
-        return;
-    }
-    uint8_t* px = m_uiCompositor->pixelsWritable();
-    if (!px) {
-        return;
-    }
-    const uint32_t pitch = m_uiCompositor->pitch();
-    const uint32_t width = m_uiCompositor->width();
-    const uint32_t height = m_uiCompositor->height();
-
-    // Clip the region to the surface bounds.
-    int x0 = rect.x;
-    int y0 = rect.y;
-    int x1 = rect.x + rect.w;
-    int y1 = rect.y + rect.h;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > static_cast<int>(width)) x1 = static_cast<int>(width);
-    if (y1 > static_cast<int>(height)) y1 = static_cast<int>(height);
-    if (x1 <= x0 || y1 <= y0) {
-        return;
-    }
-
-    for (int y = y0; y < y1; ++y) {
-        uint8_t* row = px + static_cast<size_t>(y) * pitch +
-                       static_cast<size_t>(x0) * 4;
-        memset(row, 0, static_cast<size_t>(x1 - x0) * 4);
-    }
+/// Reset the in-stream overlay cache so the next prepareStreamOverlay()
+/// re-renders the overlay from scratch. Called on stream connect (so the first
+/// overlay frame is rendered) and on stream teardown.
+void MoonlightApp::resetStreamOverlayCache() {
+    m_overlayValid = false;
+    m_prevOverlayScreen = ui::UiScreen::StreamEmpty;
+    m_prevOverlayHint = ui::StreamExitHintRenderState();
+    m_prevOverlayStats = ui::StreamStatisticsRenderState();
+    m_prevOverlayMouse = ui::MouseEmulationRenderState();
+    m_overlayActive = false;
+    m_overlayStaged = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -2997,6 +3271,8 @@ void MoonlightApp::resetStreamStatisticsBaseline() {
     m_streamStatsPrevDecodeTotalUs = 0;
     m_streamStatsPrevDecodeCount = 0;
     m_streamStatsPrevRxBytes = 0;
+    m_latestFrameDecodeUs = 0;
+    m_latestFramePresentUs = 0;
 }
 
 /// Update the in-stream statistics display snapshot once per second while a
@@ -3021,13 +3297,13 @@ void MoonlightApp::updateStreamStatistics() {
         return;
     }
 
-    // Deadline-based cadence (~1 Hz). 0 forces an immediate snapshot on the
-    // first update after stream connect.
+    // Deadline-based cadence (m_streamStatsIntervalUs, default 0.5 s). 0
+    // forces an immediate snapshot on the first update after stream connect.
     const uint64_t nowUs = m_currTimestamp;
     if (nowUs < m_streamStatsNextUpdateUs) {
         return;
     }
-    m_streamStatsNextUpdateUs = nowUs + kStreamStatsIntervalUs;
+    m_streamStatsNextUpdateUs = nowUs + m_streamStatsIntervalUs;
 
     // --- Read the cumulative counters from the subsystems ------------------
     ml::StreamStatsCounters decodeStats;
@@ -3084,6 +3360,17 @@ void MoonlightApp::updateStreamStatistics() {
             snap.jitterMs = jitterMs;
         }
     }
+
+    // Per-frame timing metrics (most-recent presented frame). These are
+    // captured in the main-thread presentation path:
+    //   frameDecodeMs  → decode time of the presented frame (VideoDecoder).
+    //   framePresentMs → NV12 conversion + overlay blend time (render()).
+    //   frameTotalMs   → decode + presentation (end-to-end frame time).
+    snap.frameDecodeMs = static_cast<float>(m_latestFrameDecodeUs) / 1000.0f;
+    snap.framePresentMs = static_cast<float>(m_latestFramePresentUs) / 1000.0f;
+    snap.frameTotalMs =
+        static_cast<float>(m_latestFrameDecodeUs + m_latestFramePresentUs) /
+        1000.0f;
 
     m_ui->setStreamStatistics(snap);
 }
@@ -5052,6 +5339,9 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         m_streamActive = true;
         m_streamFirstFramePresented = false;
         m_streamStatsOverlayLogged = false;
+        // Reset the in-stream overlay cache so the first overlay frame is
+        // rendered from scratch (no stale overlay from a previous session).
+        resetStreamOverlayCache();
         // Mouse emulation always starts OFF for a new stream session; reset
         // the edge-detection baseline so no stale toggle is detected.
         m_prevMouseEmulationEnabled = false;
@@ -5059,6 +5349,26 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         m_retiredFrames.clear();
         for (auto& ref : m_streamSlotRefs) {
             ref.valid = false;
+        }
+        // Reset the stream frame-timing instrumentation baseline so no deltas
+        // leak across stream sessions.
+        m_timingHavePrev = false;
+        m_timingFramePresented = false;
+        // Initialize the GPU NV12→BGRA fullscreen video pass. Loads the
+        // shader binaries and allocates the OpenGNM command buffer / EOP
+        // label. Initialized once per stream session and released on stream
+        // teardown.
+        if (m_gpuVideoRenderer) {
+            ps4::GpuVideoResult gvr = m_gpuVideoRenderer->initialize();
+            if (!gvr.succeeded()) {
+                char buf[160];
+                snprintf(buf, sizeof(buf),
+                         "[stream] GPU video renderer init failed: category=%d",
+                         static_cast<int>(gvr.category));
+                diagPrint(buf);
+            } else {
+                diagPrint("[stream] GPU video renderer initialized");
+            }
         }
         // Reset the stream statistics baseline for this new session so no
         // counters leak from a previous session.
@@ -5108,6 +5418,13 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             m_retiredFrames.clear();
             for (auto& ref : m_streamSlotRefs) {
                 ref.valid = false;
+            }
+            // Reset the in-stream overlay cache so no stale overlay content
+            // lingers into the next stream session.
+            resetStreamOverlayCache();
+            // Release the GPU NV12→BGRA fullscreen video pass resources.
+            if (m_gpuVideoRenderer) {
+                m_gpuVideoRenderer->shutdown();
             }
             // End the stream presentation session in the UI: clear overlay
             // state and return to the App List. No stale overlay may appear
@@ -5162,6 +5479,13 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             for (auto& ref : m_streamSlotRefs) {
                 ref.valid = false;
             }
+            // Reset the in-stream overlay cache so no stale overlay content
+            // lingers into the next stream session.
+            resetStreamOverlayCache();
+            // Release the GPU NV12→BGRA fullscreen video pass resources.
+            if (m_gpuVideoRenderer) {
+                m_gpuVideoRenderer->shutdown();
+            }
             // End the stream presentation session in the UI: clear overlay
             // state and return to the App List.
             if (m_ui && m_ui->isInitialized()) {
@@ -5204,6 +5528,13 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         m_retiredFrames.clear();
         for (auto& ref : m_streamSlotRefs) {
             ref.valid = false;
+        }
+        // Reset the in-stream overlay cache so no stale overlay content
+        // lingers into the next stream session.
+        resetStreamOverlayCache();
+        // Release the GPU NV12→BGRA fullscreen video pass resources.
+        if (m_gpuVideoRenderer) {
+            m_gpuVideoRenderer->shutdown();
         }
         // End the stream presentation session in the UI: clear overlay state
         // and return to the App List.

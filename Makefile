@@ -15,6 +15,10 @@ PKG_DIR     := pkg_template
 
 PROJECT_NAME := $(shell basename $(CURDIR))
 
+# Zip archive naming
+ZIP_NAME := moonlight_dx_ps4_$(VERSION).zip
+SHA_NAME := moonlight_dk_ps4_$(VERSION)_sha256.txt
+
 SRCS        := $(shell find $(SRC_DIR) \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \))
 
 # Package contents (full paths for dependencies)
@@ -45,15 +49,15 @@ all: $(CONTENT_ID).pkg
 
 # Zip target: build the pkg if needed, then create a zip archive and checksum
 zip: $(CONTENT_ID).pkg
-	zip $(CONTENT_ID).zip $(CONTENT_ID).pkg
-	shasum -a 256 $(CONTENT_ID).zip > $(CONTENT_ID)_sha.txt
+	zip $(ZIP_NAME) $(CONTENT_ID).pkg LICENSE CHANGELOG README-moonlight-dx.txt
+	shasum -a 256 $(ZIP_NAME) > $(SHA_NAME)
 
 # FTP upload target: build the pkg if needed, then upload it
 ftp: $(CONTENT_ID).pkg
 	# Upload and then immediately list the directory to confirm
 	curl -T $(CONTENT_ID).pkg ftp://$(FTP_HOST):$(FTP_PORT)$(FTP_PATH) && curl ftp://$(FTP_HOST):$(FTP_PORT)$(FTP_PATH)
 
-$(CONTENT_ID).pkg: pkg.gp4
+pkg $(CONTENT_ID).pkg: pkg.gp4
 	cd $(PKG_DIR) && $(TOOLS_DIR)/PkgTool.Core pkg_build pkg.gp4 ..
 
 pkg.gp4: $(PKG_DIR)/pkg.gp4
@@ -83,6 +87,6 @@ $(BUILD_DIR)/$(PROJECT_NAME).elf: $(SRCS) CMakeLists.txt
 	cmake --build $(BUILD_DIR)
 
 clean:
-	rm -rf $(BUILD_DIR) eboot.bin $(CONTENT_ID).pkg $(CONTENT_ID).zip checksum.txt pkg.gp4 $(PKG_DIR)/sce_sys/param.sfo $(PKG_DIR)/eboot.bin $(PKG_DIR)/pkg.gp4
+	rm -rf $(BUILD_DIR) eboot.bin $(CONTENT_ID).pkg $(ZIP_NAME) $(SHA_NAME) pkg.gp4 $(PKG_DIR)/sce_sys/param.sfo $(PKG_DIR)/eboot.bin $(PKG_DIR)/pkg.gp4
 
 

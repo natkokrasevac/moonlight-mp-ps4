@@ -1,0 +1,24 @@
+// PSSL pixel shader — fullscreen overlay blend pass.
+//
+// Samples the cached in-stream overlay texture (a full 1920x1080 RGBA8 surface,
+// transparent except where an overlay panel is drawn) and outputs its RGBA. The
+// GPU blend unit (source-over, straight alpha) composites it over the video
+// already in the framebuffer. Where the overlay is transparent (alpha 0) the
+// video shows through unchanged.
+//
+// Binding (PS direct user data):
+//   tex : UD DWORD 0-7   (T# descriptor, 8 DWORDs)   startreg 0
+//   smp : UD DWORD 8-11  (S# descriptor, 4 DWORDs)   startreg 8
+
+SamplerState smp : register(s0);
+Texture2D    tex : register(t0);
+
+struct PS_INPUT
+{
+    float2 uv : TEXCOORD0;
+};
+
+float4 main(PS_INPUT input) : S_TARGET_OUTPUT
+{
+    return tex.Sample(smp, input.uv);
+}

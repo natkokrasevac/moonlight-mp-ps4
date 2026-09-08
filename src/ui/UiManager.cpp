@@ -861,6 +861,18 @@ bool UiManager::buildStreamStatisticsRenderState(StreamStatisticsRenderState& ou
         snprintf(buf, sizeof(buf), "%.1f ms", s.jitterMs);
         state.jitter = buf;
     }
+    if (s.frameDecodeMs > 0.0f) {
+        snprintf(buf, sizeof(buf), "%.1f ms", s.frameDecodeMs);
+        state.frameDecodeTime = buf;
+    }
+    if (s.framePresentMs > 0.0f) {
+        snprintf(buf, sizeof(buf), "%.1f ms", s.framePresentMs);
+        state.framePresentTime = buf;
+    }
+    if (s.frameTotalMs > 0.0f) {
+        snprintf(buf, sizeof(buf), "%.1f ms", s.frameTotalMs);
+        state.frameTotalTime = buf;
+    }
 
     out = std::move(state);
     return true;
@@ -1807,6 +1819,52 @@ void UiManager::processInput(const UiInput& input) {
     if (m_impl->screen == UiScreen::HostList) {
         const int itemCount = static_cast<int>(m_impl->hosts.size());
 
+        // --- Global actions (do not require a selected host) ----------------
+        // These must work even when the list is empty (e.g. a fresh install
+        // with no persisted paired hosts and no mDNS hosts), so the user can
+        // still Add Host Manually, open Settings, open Help, or Back out.
+        if (input.squarePressed) {
+            m_impl->addHostOpen = true;
+            m_impl->addHostImeActive = false;
+            m_impl->addHostSelected = Impl::AddHostField::IpAddress;
+            m_impl->addHostValidationError.clear();
+            // Prepopulate the IP field with the console's own address so
+            // entering a host on the same network is easier. Only set it when
+            // the field is empty (don't clobber a previously entered value).
+            if (m_impl->addHostIpText.empty() &&
+                !m_impl->localIpAddress.empty()) {
+                m_impl->addHostIpText = m_impl->localIpAddress;
+            }
+            if (m_impl->addHostPortText.empty()) {
+                m_impl->addHostPortText = "47989";
+            }
+            return;
+        }
+
+        if (input.backPressed) {
+            m_impl->pendingIntent = UiIntent(UiIntentType::Back);
+            m_impl->pendingSoundIntent = UiSoundIntent::Back;
+            return;
+        }
+
+        if (input.optionsPressed) {
+            m_impl->settingsOverlayOpen = true;
+            m_impl->settingsSelectedRow = 0;
+            m_impl->pendingIntent = UiIntent(UiIntentType::OpenSettings);
+            m_impl->pendingSoundIntent = UiSoundIntent::SettingsOpen;
+            return;
+        }
+
+        // Touchpad Click opens the Help screen.
+        if (input.touchpadPressed) {
+            m_impl->helpOpen = true;
+            m_impl->helpReturnScreen = UiScreen::HostList;
+            m_impl->screen = UiScreen::Help;
+            m_impl->pendingSoundIntent = UiSoundIntent::Accept;
+            return;
+        }
+
+        // --- Host-selection-dependent actions (require a non-empty list) ----
         if (itemCount <= 0) {
             return;
         }
@@ -1866,24 +1924,6 @@ void UiManager::processInput(const UiInput& input) {
             m_impl->pendingSoundIntent = UiSoundIntent::Accept;
         }
 
-        if (input.squarePressed) {
-            m_impl->addHostOpen = true;
-            m_impl->addHostImeActive = false;
-            m_impl->addHostSelected = Impl::AddHostField::IpAddress;
-            m_impl->addHostValidationError.clear();
-            // Prepopulate the IP field with the console's own address so
-            // entering a host on the same network is easier. Only set it when
-            // the field is empty (don't clobber a previously entered value).
-            if (m_impl->addHostIpText.empty() &&
-                !m_impl->localIpAddress.empty()) {
-                m_impl->addHostIpText = m_impl->localIpAddress;
-            }
-            if (m_impl->addHostPortText.empty()) {
-                m_impl->addHostPortText = "47989";
-            }
-            return;
-        }
-
         if (input.trianglePressed &&
             m_impl->selectedHostIndex >= 0 &&
             m_impl->selectedHostIndex < itemCount) {
@@ -1893,26 +1933,6 @@ void UiManager::processInput(const UiInput& input) {
             m_impl->deleteConfirmHostId = host.id;
             m_impl->deleteConfirmHostName = host.displayName;
             return;
-        }
-
-        if (input.backPressed) {
-            m_impl->pendingIntent = UiIntent(UiIntentType::Back);
-            m_impl->pendingSoundIntent = UiSoundIntent::Back;
-        }
-
-        if (input.optionsPressed) {
-            m_impl->settingsOverlayOpen = true;
-            m_impl->settingsSelectedRow = 0;
-            m_impl->pendingIntent = UiIntent(UiIntentType::OpenSettings);
-            m_impl->pendingSoundIntent = UiSoundIntent::SettingsOpen;
-        }
-
-        // Touchpad Click opens the Help screen.
-        if (input.touchpadPressed) {
-            m_impl->helpOpen = true;
-            m_impl->helpReturnScreen = UiScreen::HostList;
-            m_impl->screen = UiScreen::Help;
-            m_impl->pendingSoundIntent = UiSoundIntent::Accept;
         }
     }
 }

@@ -61,7 +61,7 @@
 // (retainAu / retireExpiredAus) in place, the decoder correctly handles
 // reference frames without the SPS rewrite. Set to 1 to enable the SPS
 // rewrite, 0 to pass the host's SPS through unchanged.
-#define ML_ENABLE_SPS_FIXUP 0
+#define ML_ENABLE_SPS_FIXUP 1
 #endif
 
 // --- Native PS4 network API (proven OpenOrbis path) --------------------------
