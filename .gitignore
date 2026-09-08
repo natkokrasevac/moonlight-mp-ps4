@@ -11,7 +11,7 @@ _sdk/
 *.gp4
 *.pkg
 *.zip
-*_sha.txt
+*_sha256.txt
 eboot.bin
 param.sfo
 
