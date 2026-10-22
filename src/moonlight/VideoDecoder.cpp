@@ -71,13 +71,50 @@ static void vdDiagPrint(const char* msg) {
 
 namespace {
 
-#define ORBIS_VIDEODEC2_CODEC_AVC 1
-#define ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED 1u
+#define ORBIS_VIDEODEC2_CODEC_AVC  1
+// SCE_VIDEODEC2_CODEC_TYPE_HEVC = 974921 (0xEE049). This is the Videodec2
+// codecType value for H.265/HEVC (see SCE_VIDEODEC2_CODEC_TYPE).
+#define ORBIS_VIDEODEC2_CODEC_HEVC 974921u
+// SCE_VIDEODEC2_RESOURCE_TYPE_COMPUTE = 1 (use an allocated compute queue).
+#define ORBIS_VIDEODEC2_RESOURCE_TYPE_COMPUTE  1u
 #define ORBIS_VIDEODEC2_PROFILE_HIGH           100u
-#define ORBIS_VIDEODEC2_LEVEL_51               51u
+// SCE_VIDEODEC2_AVC_LEVEL_* values (see videodec2/avc.h). The AVC level must
+// accommodate BOTH the stream resolution AND the stream bitrate. A level that
+// is too low for the stream faults the decoder core with
+// SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE (0x811D0302).
+#define ORBIS_VIDEODEC2_AVC_LEVEL_3_1          31u
+#define ORBIS_VIDEODEC2_AVC_LEVEL_3_2          32u
+#define ORBIS_VIDEODEC2_AVC_LEVEL_4_0          40u
+#define ORBIS_VIDEODEC2_AVC_LEVEL_4_1          41u
+#define ORBIS_VIDEODEC2_AVC_LEVEL_4_2          42u
+#define ORBIS_VIDEODEC2_AVC_LEVEL_5_0          50u
+#define ORBIS_VIDEODEC2_AVC_LEVEL_5_1          51u
+#define ORBIS_VIDEODEC2_AVC_LEVEL_5_2          52u
+// SCE_VIDEODEC2_HEVC_PROFILE_MAIN = 1.
+#define ORBIS_VIDEODEC2_HEVC_PROFILE_MAIN      1u
+// SCE_VIDEODEC2_HEVC_LEVEL_* values (see videodec2/hevc.h). The HEVC level
+// must accommodate BOTH the stream resolution AND the stream bitrate. A level
+// that is too low for the stream faults the decoder core with
+// SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE (0x811D0302).
+#define ORBIS_VIDEODEC2_HEVC_LEVEL_4_0         120u
+// SCE_VIDEODEC2_HEVC_LEVEL_4_1 = 123 (HEVC level 4.1, used for 1080p).
+#define ORBIS_VIDEODEC2_HEVC_LEVEL_4_1         123u
+#define ORBIS_VIDEODEC2_HEVC_LEVEL_5_0         150u
+// SCE_VIDEODEC2_HEVC_LEVEL_5_1 = 153 (HEVC level 5.1, used for 4K).
+#define ORBIS_VIDEODEC2_HEVC_LEVEL_5_1         153u
+// SCE_VIDEODEC2_HEVC_TIER_TYPE_HIGH = 1 (Main tier = 0).
+#define ORBIS_VIDEODEC2_HEVC_TIER_HIGH         1
+// SCE_VIDEODEC2_HEVC_GPU_LOAD_LEVEL_3 = 3 (moves CPU work to the GPU; the
+// value used by the official hevc_basic sample).
+#define ORBIS_VIDEODEC2_HEVC_GPU_LOAD_LEVEL_3  3u
+// SCE_VIDEODEC2_FRAME_FORMAT_DEFAULT = 0 (NV12, 8-bit).
+#define ORBIS_VIDEODEC2_FRAME_FORMAT_DEFAULT   0u
 #define ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT    700
 #define ORBIS_VIDEODEC2_AFFINITY_ALL           0x3Full
 #define ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH     4
+// SCE_VIDEODEC2_ERROR_NEW_SEQUENCE = 0x811D0300. Returned by Decode() when the
+// input stream changes to a new sequence; the decoder must be reset.
+#define ORBIS_VIDEODEC2_ERROR_NEW_SEQUENCE     0x811D0300u
 
 struct Vd2ComputeConfigInfo {
     uint64_t thisSize;
@@ -112,6 +149,21 @@ struct Vd2DecoderConfigInfo {
     uint8_t reserved0;
     uint8_t reserved1;
     void* extraConfigInfo;
+};
+
+// SceVideodec2HevcExtraConfigInfo. Required for HEVC: the decoder core reads
+// tier/bit-depth/gpuLoadLevel from this structure. Leaving extraConfigInfo
+// NULL makes the library apply defaults that do not match the stream and can
+// fault the decoder core (VDECCORE).
+struct Vd2HevcExtraConfigInfo {
+    uint64_t thisSize;
+    int32_t  tierType;
+    int8_t   maxBitDepthLuma;
+    int8_t   maxBitDepthChroma;
+    uint16_t reserved0;
+    int32_t  maxTemporalIdToDecode;
+    uint32_t hdrFrameFormat;
+    uint32_t gpuLoadLevel;
 };
 
 struct Vd2DecoderMemoryInfo {
@@ -237,15 +289,12 @@ constexpr int32_t kDmemTypeGarlic = ORBIS_KERNEL_WC_GARLIC;
 /// Memory protection for CPU+GPU access.
 constexpr int32_t kDmemProt = ORBIS_KERNEL_PROT_CPU_RW | ORBIS_KERNEL_PROT_GPU_ALL;
 
-/// Decoder pipeline depth (frame-parallel decode).
-/// Set to 2 to enable frame-parallel decode throughput. The AU input-buffer
-/// lifetime contract (retainAu / retireExpiredAus) keeps each compressed AU
-/// alive for the full pipeline depth, preventing the stale-content corruption
-/// that previously occurred at depth > 1.
+/// Decoder pipeline depth (frame-parallel decode). Matches the SDK HEVC
+/// preset value of 4. The AU input-buffer lifetime contract (retainAu /
+/// retireExpiredAus) keeps each compressed AU alive for the full pipeline
+/// depth, preventing the stale-content corruption that previously occurred
+/// at depth > 1.
 constexpr uint32_t kDecodePipelineDepth = 4;
-
-/// DPB frame count.
-constexpr int32_t kMaxDpbFrameCount = 4;
 
 } // namespace
 
@@ -359,7 +408,7 @@ struct VideoDecoder::Impl {
     DmemBlock cpuMem;          ///< Onion, CPU (decoder working area).
     DmemBlock gpuMem;          ///< Garlic, CPU+GPU (decoder working area).
     DmemBlock cpuGpuMem;       ///< Onion, CPU+GPU (decoder working area).
-    DmemBlock frameBufferMem;  ///< Onion, CPU+GPU (frame buffers).
+    DmemBlock frameBufferMem;  ///< Garlic, GPU-written output frame buffers.
 
     // --- Frame buffer pool --------------------------------------------------
     FrameBuffer frameBuffers[kFrameBufferCount];
@@ -406,6 +455,14 @@ struct VideoDecoder::Impl {
     // --- Diagnostics --------------------------------------------------------
     std::atomic<bool> firstIdrLogged{false};
     std::atomic<bool> firstFrameLogged{false};
+    /// One-time flag: the first sceVideodec2Decode() result (success or
+    /// failure) has been logged. Captures the return code, AU size, and the
+    /// output frame dimensions for stream-issue diagnosis.
+    std::atomic<bool> firstDecodeResultLogged{false};
+    /// One-time flag: the first decode error has been logged with its return
+    /// code. Separate from firstDecodeResultLogged so a first-IDR failure is
+    /// always captured even if a prior decode succeeded.
+    std::atomic<bool> firstDecodeErrorLogged{false};
 
     // --- Retained AU input-buffer lifetime (Videodec2 frame-parallel) -------
     // Videodec2 frame-parallel input lifetime contract:
@@ -673,6 +730,11 @@ int vdLoadVdecDeps() {
         "/system/common/lib/libSceVdecCore.sprx",
         "/system/common/lib/libSceVdecSavc.sprx",
         "/system/common/lib/libSceVdecSavc2.sprx",
+        // HEVC codec module (required for H.265/HEVC decode on PS4 Pro). The
+        // exact sprx name is a hardware-validation item; it is loaded as an
+        // optional dependency (a failure is logged but not fatal) so AVC-only
+        // decode still works if the module is absent or named differently.
+        "/system/common/lib/libSceVdecSdec.sprx",
         "/system/common/lib/libSceVdecwrap.sprx",
     };
     for (size_t i = 0; i < sizeof(mods) / sizeof(mods[0]); ++i) {
@@ -720,27 +782,213 @@ int vdLoadApi(Vd2Api* api) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Decoder level selection
+// ---------------------------------------------------------------------------
+// The configured level must accommodate BOTH the stream resolution AND the
+// stream bitrate. A level too low for the stream faults the decoder core with
+// SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE (0x811D0302). The level is therefore the
+// MAXIMUM of a resolution-derived floor (the SDK preset) and a bitrate-derived
+// requirement (the codec's Annex A MaxBR).
+//
+// AVC (H.264) — High profile:
+//   Level | idc | MaxBR (High profile) | Typical use
+//   ------+-----+----------------------+------------
+//    3.1  |  31 |  14,000 kbps         | 720p30
+//    3.2  |  32 |  20,000 kbps         | 720p60
+//    4.0  |  40 |  20,000 kbps         | 1080p30
+//    4.1  |  41 |  50,000 kbps         | 1080p60
+//    4.2  |  42 |  50,000 kbps         | 1080p60
+//    5.0  |  50 | 135,000 kbps         | 4K30
+//    5.1  |  51 | 240,000 kbps         | 4K60
+//    5.2  |  52 | 240,000 kbps         | 4K60
+//
+// HEVC (H.265) — Main profile, High tier (the decoder is configured with
+// tierType = HIGH, which also accepts Main-tier streams; the High-tier MaxBR
+// bounds the check):
+//   Level | idc | MaxBR (High tier)    | Typical use
+//   ------+-----+----------------------+------------
+//    4.0  | 120 |  30,000 kbps         | 1080p30
+//    4.1  | 123 |  50,000 kbps         | 1080p60
+//    5.0  | 150 | 150,000 kbps         | 4K30
+//    5.1  | 153 | 300,000 kbps         | 4K60
+//    5.2  | 156 | 300,000 kbps         | 4K60
+//
+// Combined, keyed by resolution/fps:
+//   Resolution/fps | AVC level (idc)      | AVC MaxBR    | HEVC level (idc)     | HEVC MaxBR
+//   ---------------+----------------------+--------------+----------------------+-------------
+//    720p30        | 3.1 (31)             |  14,000 kbps | —                    | —
+//    720p60        | 3.2 (32)             |  20,000 kbps | —                    | —
+//    1080p30       | 4.0 (40)             |  20,000 kbps | 4.0 (120)            |  30,000 kbps
+//    1080p60       | 4.1 / 4.2 (41/42)    |  50,000 kbps | 4.1 (123)            |  50,000 kbps
+//    4K30          | 5.0 (50)             | 135,000 kbps | 5.0 (150)            | 150,000 kbps
+//    4K60          | 5.1 / 5.2 (51/52)    | 240,000 kbps | 5.1 / 5.2 (153/156)  | 300,000 kbps
+//
+// HEVC has no 720p entry because the SDK HEVC presets start at 1080p (L4.1);
+// the resolution floor for anything <=1080p is L4.1, which safely covers 720p.
+//
+// Note: a Mac host (VideoToolbox) has been observed to produce streams that
+// fault the decoder core at high bitrates for a given resolution, while an
+// NVIDIA/Windows host does not at the same resolution and bitrate. That is a
+// host-encoder issue (slice structure / coded size / NAL layout), not a
+// decoder-configuration issue: the same decoder config works with the NVIDIA
+// host. Over-provisioning level/DPB was tried and did NOT fix the Mac case,
+// so the config is kept at the SDK-preset-matched values.
+
+// HEVC level per the SDK preset table (resolution floor):
+//   1080p -> Main, L4.1, DPB 6
+//   2160p -> Main, L5.1, DPB 6
+uint32_t vdHevcLevelForHeight(int h) {
+    return (h > 1080) ? ORBIS_VIDEODEC2_HEVC_LEVEL_5_1
+                      : ORBIS_VIDEODEC2_HEVC_LEVEL_4_1;
+}
+
+// HEVC level required to cover a given bitrate (HEVC Annex A MaxBR, High
+// tier, in kbps). The decoder is configured with tierType = HIGH, so the
+// High-tier MaxBR bounds the check:
+//   L4.0 -> 30000, L4.1 -> 50000, L5.0 -> 150000, L5.1 -> 300000.
+// The configured level must be at least this, or the decoder core rejects the
+// stream with SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE.
+uint32_t vdHevcLevelForBitrate(uint32_t bitrateKbps) {
+    if (bitrateKbps > 150000) return ORBIS_VIDEODEC2_HEVC_LEVEL_5_1;  // >150 Mbps
+    if (bitrateKbps > 50000)  return ORBIS_VIDEODEC2_HEVC_LEVEL_5_0;  // 50-150 Mbps
+    if (bitrateKbps > 30000)  return ORBIS_VIDEODEC2_HEVC_LEVEL_4_1;  // 30-50 Mbps
+    return ORBIS_VIDEODEC2_HEVC_LEVEL_4_0;                            // <=30 Mbps
+}
+
+// The HEVC level must satisfy BOTH the resolution and the bitrate. Return the
+// higher of the two so the configured level always covers the stream.
+uint32_t vdHevcLevelForStream(int h, uint32_t bitrateKbps) {
+    const uint32_t byRes = vdHevcLevelForHeight(h);
+    const uint32_t byBitrate = vdHevcLevelForBitrate(bitrateKbps);
+    return (byBitrate > byRes) ? byBitrate : byRes;
+}
+
+// AVC level per the SDK preset table (resolution floor):
+//   720p  -> High, L3.2, DPB 5
+//   1080p -> High, L4.2, DPB 4
+//   2160p -> High, L5.2, DPB 5
+uint32_t vdAvcLevelForHeight(int h) {
+    if (h > 1080) return ORBIS_VIDEODEC2_AVC_LEVEL_5_2;
+    if (h > 720)  return ORBIS_VIDEODEC2_AVC_LEVEL_4_2;
+    return ORBIS_VIDEODEC2_AVC_LEVEL_3_2;
+}
+
+// AVC level required to cover a given bitrate (H.264 Annex A MaxBR, High
+// profile, in kbps):
+//   L3.1 -> 14000, L3.2 -> 20000, L4.0 -> 20000, L4.1 -> 50000,
+//   L4.2 -> 50000, L5.0 -> 135000, L5.1 -> 240000, L5.2 -> 240000.
+// The configured level must be at least this, or the decoder core rejects the
+// stream with SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE.
+uint32_t vdAvcLevelForBitrate(uint32_t bitrateKbps) {
+    if (bitrateKbps > 135000) return ORBIS_VIDEODEC2_AVC_LEVEL_5_2;  // >135 Mbps
+    if (bitrateKbps > 50000)  return ORBIS_VIDEODEC2_AVC_LEVEL_5_0;  // 50-135 Mbps
+    if (bitrateKbps > 20000)  return ORBIS_VIDEODEC2_AVC_LEVEL_4_1;  // 20-50 Mbps
+    if (bitrateKbps > 14000)  return ORBIS_VIDEODEC2_AVC_LEVEL_3_2;  // 14-20 Mbps
+    return ORBIS_VIDEODEC2_AVC_LEVEL_3_1;                            // <=14 Mbps
+}
+
+// The AVC level must satisfy BOTH the resolution and the bitrate. Return the
+// higher of the two so the configured level always covers the stream.
+uint32_t vdAvcLevelForStream(int h, uint32_t bitrateKbps) {
+    const uint32_t byRes = vdAvcLevelForHeight(h);
+    const uint32_t byBitrate = vdAvcLevelForBitrate(bitrateKbps);
+    return (byBitrate > byRes) ? byBitrate : byRes;
+}
+
+// AVC DPB frame count per the SDK preset table (resolution-dependent):
+//   720p -> 5, 1080p -> 4, 2160p -> 5.
+int32_t vdAvcDpbForHeight(int h) {
+    if (h > 1080) return 5;   // 2160p preset: DPB 5
+    if (h > 720)  return 4;   // 1080p preset: DPB 4
+    return 5;                 // 720p preset: DPB 5
+}
+
+// HEVC DPB frame count per the SDK preset table (all HEVC presets use 6).
+constexpr int32_t kHevcDpbFrameCount = 6;
+
 void vdFillDecoderConfig(Vd2DecoderConfigInfo* dc, Vd2ComputeQueue q,
-                         int w, int h, int pipelineDepth, int cpuPriority) {
+                         int w, int h, int pipelineDepth, int cpuPriority,
+                         bool hevc, uint32_t bitrateKbps,
+                         Vd2HevcExtraConfigInfo* hevcExtra) {
     if (pipelineDepth < 1) pipelineDepth = 1;
     if (pipelineDepth > ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH) pipelineDepth = ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH;
     if (cpuPriority <= 0) cpuPriority = ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT;
 
     memset(dc, 0, sizeof(*dc));
     dc->thisSize = sizeof(*dc);
-    dc->resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
-    dc->codecType = ORBIS_VIDEODEC2_CODEC_AVC;
-    dc->profile = ORBIS_VIDEODEC2_PROFILE_HIGH;
-    dc->maxLevel = ORBIS_VIDEODEC2_LEVEL_51;
-    dc->maxFrameWidth = w;
-    dc->maxFrameHeight = (h + 15) & ~15;  // macroblock-align
-    dc->maxDpbFrameCount = kMaxDpbFrameCount;
+    dc->resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_COMPUTE;
+
+    // The library aligns maxFrameWidth to 256 and maxFrameHeight to 16 (AVC)
+    // or 8 (HEVC) internally. Pre-align to the same values so the queried
+    // memory sizes match what the decoder will actually use.
+    dc->maxFrameWidth = (w + 255) & ~255;
+
+    if (hevc) {
+        // H.265/HEVC: Main profile. The level must cover BOTH the resolution
+        // and the requested bitrate (a level too low for the stream faults the
+        // decoder core with OVERSIZE_DECODE). The DPB matches the SDK HEVC
+        // preset (all HEVC presets use DPB 6).
+        dc->codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
+        dc->profile = ORBIS_VIDEODEC2_HEVC_PROFILE_MAIN;
+        dc->maxLevel = vdHevcLevelForStream(h, bitrateKbps);
+        // Align maxFrameWidth/maxFrameHeight to the HEVC CTU size (64).
+        //
+        // HEVC codes pictures in Coding Tree Units (CTUs) up to 64x64. The
+        // coded picture dimensions are the SPS pic_width/height_in_luma_samples
+        // rounded UP to the next CTU multiple. The decoder instance must be
+        // configured for at least the coded size, or the stream exceeds the
+        // instance and sceVideodec2Decode() returns
+        // SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE (0x811D0302).
+        //
+        // This is why a 3840x2160 HEVC stream fails when configured for
+        // 3840x2160: 2160 is NOT a multiple of 64 (2160/64 = 33.75), so the
+        // coded height is 2176 (34*64) > 2160. 1080p happens to work because
+        // 1080 rounds up to 1088 (17*64), which our previous 16-alignment also
+        // produced. Aligning to 64 covers both (2160 -> 2176, 1080 -> 1088).
+        //
+        // The library additionally aligns maxFrameWidth to 256 and
+        // maxFrameHeight to 8 internally; aligning to 64 here is a superset
+        // (64 is a multiple of both 8 and 256's factor 8), so the configured
+        // values are never reduced below the coded size.
+        dc->maxFrameWidth = (w + 63) & ~63;   // HEVC: multiple of 64 (CTU).
+        dc->maxFrameHeight = (h + 63) & ~63;  // HEVC: multiple of 64 (CTU).
+        dc->maxDpbFrameCount = kHevcDpbFrameCount;
+
+        // Populate the HEVC extra config. It must never be left NULL: the
+        // decoder core reads tier/bit-depth/gpuLoadLevel from it, and the
+        // library defaults (applied when NULL) do not match the stream.
+        if (hevcExtra != nullptr) {
+            memset(hevcExtra, 0, sizeof(*hevcExtra));
+            hevcExtra->thisSize = sizeof(*hevcExtra);
+            hevcExtra->tierType = ORBIS_VIDEODEC2_HEVC_TIER_HIGH;
+            hevcExtra->maxBitDepthLuma = 8;    // Main profile -> 8-bit.
+            hevcExtra->maxBitDepthChroma = 8;
+            hevcExtra->maxTemporalIdToDecode = -1;  // Decode all temporal layers.
+            hevcExtra->hdrFrameFormat = ORBIS_VIDEODEC2_FRAME_FORMAT_DEFAULT;
+            hevcExtra->gpuLoadLevel = ORBIS_VIDEODEC2_HEVC_GPU_LOAD_LEVEL_3;
+            dc->extraConfigInfo = hevcExtra;
+        }
+    } else {
+        // H.264/AVC: High profile. The level must cover BOTH the resolution
+        // and the requested bitrate (a level too low for the stream faults the
+        // decoder core with OVERSIZE_DECODE). The DPB matches the SDK AVC
+        // preset for the resolution. extraConfigInfo must be NULL for AVC.
+        dc->codecType = ORBIS_VIDEODEC2_CODEC_AVC;
+        dc->profile = ORBIS_VIDEODEC2_PROFILE_HIGH;
+        dc->maxLevel = vdAvcLevelForStream(h, bitrateKbps);
+        dc->maxFrameHeight = (h + 15) & ~15;  // AVC: multiple of 16.
+        dc->maxDpbFrameCount = vdAvcDpbForHeight(h);
+        dc->extraConfigInfo = nullptr;
+    }
     dc->decodePipelineDepth = static_cast<uint32_t>(pipelineDepth);
     dc->computeQueue = q;
     dc->cpuAffinityMask = ORBIS_VIDEODEC2_AFFINITY_ALL;
     dc->cpuThreadPriority = cpuPriority;
     dc->optimizeProgressiveVideo = true;
-    dc->checkMemoryType = false;
+    // The AVC SDK preset checks the memory type (true); the HEVC preset does
+    // not (false). Match each codec's reference preset.
+    dc->checkMemoryType = !hevc;
 }
 
 } // namespace
@@ -787,7 +1035,12 @@ void* VideoDecoder::decoderWorker(void* arg) {
         }
 
         // --- Validate the unit ----------------------------------------------
-        if (unit.codecType != 0x01 /* VIDEO_FORMAT_H264 */ ||
+        // Accept H.264 (0x01) and H.265/HEVC (0xEE049) codec types. The codec
+        // type is set by StreamSessionManager from the negotiated video format.
+        const bool codecOk =
+            unit.codecType == 0x01 /* VIDEO_FORMAT_H264 */ ||
+            unit.codecType == ORBIS_VIDEODEC2_CODEC_HEVC;
+        if (!codecOk ||
             unit.fullLength == 0 ||
             unit.data.size() != unit.fullLength ||
             unit.data.size() > kMaxVideoUnitSize) {
@@ -918,9 +1171,67 @@ void* VideoDecoder::decoderWorker(void* arg) {
         // The input AU is now consumed.
         impl->encodedConsumed.fetch_add(1);
 
+        // --- One-time first-decode result log (stream-issue diagnosis) ------
+        // Captures the first sceVideodec2Decode() outcome: return code, AU
+        // size, frame type, and (on success) the output frame dimensions and
+        // pitch. This is the ground truth for diagnosing a decoder-core fault
+        // on the first IDR.
+        if (!impl->firstDecodeResultLogged.exchange(true)) {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "[video] first decode: rc=0x%08X auSize=%u frame=%llu "
+                     "type=%s valid=%d err=%d out=%ux%u pitch=%u",
+                     static_cast<uint32_t>(rc),
+                     static_cast<unsigned>(inputData.auSize),
+                     static_cast<unsigned long long>(unit.frameNumber),
+                     unit.frameType == 1 ? "IDR" : "PFRAME",
+                     outputInfo.isValid ? 1 : 0,
+                     outputInfo.isErrorFrame ? 1 : 0,
+                     outputInfo.frameWidth, outputInfo.frameHeight,
+                     outputInfo.framePitchInBytes);
+            vdDiagPrint(buf);
+        }
+
         if (rc != 0) {
             impl->releaseFrameBuffer(bufIndex);
             impl->decodeErrors.fetch_add(1);
+
+            // --- One-time first decode-error log (stream-issue diagnosis) ---
+            // Logs the first failing decode with its return code in hex. The
+            // code identifies the failure class:
+            //   0x811D0300 NEW_SEQUENCE   (handled below)
+            //   0x811D0301 ACCESS_UNIT    (decode error in the AU)
+            //   0x811D0302 OVERSIZE_DECODE (stream exceeds configured range)
+            //   0x811D0303 INVALID_SEQUENCE (SPS/sequence invalid)
+            //   0x811D0304 FATAL_STREAM   (fatal stream error)
+            //   0x811D0104 MEMORY_SIZE / 0x811D0106 FRAME_BUFFER_SIZE (sizing)
+            if (!impl->firstDecodeErrorLogged.exchange(true)) {
+                char buf[192];
+                snprintf(buf, sizeof(buf),
+                         "[video] first decode ERROR: rc=0x%08X auSize=%u "
+                         "frame=%llu type=%s",
+                         static_cast<uint32_t>(rc),
+                         static_cast<unsigned>(inputData.auSize),
+                         static_cast<unsigned long long>(unit.frameNumber),
+                         unit.frameType == 1 ? "IDR" : "PFRAME");
+                vdDiagPrint(buf);
+            }
+
+            // Sequence change: reset the decoder and request a fresh IDR. The
+            // AU that triggered the change is discarded (the SDK sample resets
+            // then re-submits; we rely on the IDR request to recover).
+            if (static_cast<uint32_t>(rc) == ORBIS_VIDEODEC2_ERROR_NEW_SEQUENCE) {
+                if (impl->api.Reset) {
+                    impl->api.Reset(impl->decoder);
+                }
+                // Reset aborts in-flight frame-parallel processing; the
+                // decoder no longer references any input AUs.
+                impl->clearRetainedAus();
+                impl->state = VideoDecoderState::WaitingForIdr;
+                LiRequestIdrFrame();
+                impl->idrRequests.fetch_add(1);
+                continue;
+            }
 
             // Map Videodec2 return codes to the decoder error policy.
             // (Return codes are negative; treat any failure as recoverable
@@ -975,11 +1286,14 @@ void* VideoDecoder::decoderWorker(void* arg) {
         impl->statsDecodedFrames.fetch_add(1, std::memory_order_relaxed);
 
         if (!impl->firstFrameLogged.exchange(true)) {
-            char buf[128];
+            char buf[192];
             snprintf(buf, sizeof(buf),
-                     "[video] first frame decoded (frame=%llu %ux%u)",
+                     "[video] first frame decoded (frame=%llu %ux%u) "
+                     "pitch=%u pitchBytes=%u format=%u",
                      static_cast<unsigned long long>(unit.frameNumber),
-                     outputInfo.frameWidth, outputInfo.frameHeight);
+                     outputInfo.frameWidth, outputInfo.frameHeight,
+                     outputInfo.framePitch, outputInfo.framePitchInBytes,
+                     outputInfo.frameFormat);
             vdDiagPrint(buf);
         }
     }
@@ -1055,6 +1369,8 @@ VideoDecoderResult VideoDecoder::initialize() {
     m_impl->rtpTimestampBase = 0;
     m_impl->firstIdrLogged = false;
     m_impl->firstFrameLogged = false;
+    m_impl->firstDecodeResultLogged = false;
+    m_impl->firstDecodeErrorLogged = false;
     m_impl->encodedConsumed = 0;
     m_impl->framesDecoded = 0;
     m_impl->decodeErrors = 0;
@@ -1101,7 +1417,7 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
         config.fps < 1 || config.fps > 240) {
         return VideoDecoderResult(VideoDecoderResultCategory::InvalidConfiguration);
     }
-    if (config.codec != VideoCodec::H264) {
+    if (config.codec != VideoCodec::H264 && config.codec != VideoCodec::H265) {
         return VideoDecoderResult(VideoDecoderResultCategory::UnsupportedCodec);
     }
 
@@ -1167,11 +1483,17 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
 
     // --- Query decoder memory ------------------------------------------------
     Vd2DecoderConfigInfo dc;
+    // HEVC extra config storage. Must outlive both QueryDecoderMemoryInfo()
+    // and CreateDecoder(), which read it synchronously via dc.extraConfigInfo.
+    Vd2HevcExtraConfigInfo hevcExtra;
     vdFillDecoderConfig(&dc, m_impl->api.queue,
                         static_cast<int>(config.width),
                         static_cast<int>(config.height),
                         static_cast<int>(kDecodePipelineDepth),
-                        ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT);
+                        ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT,
+                        config.codec == VideoCodec::H265,
+                        config.bitrateKbps,
+                        &hevcExtra);
 
     Vd2DecoderMemoryInfo dm;
     memset(&dm, 0, sizeof(dm));
@@ -1214,13 +1536,16 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     }
 
     // --- Allocate frame buffers ----------------------------------------------
+    // The output frame buffers are written by the GPU (compute shaders) and
+    // read by the CPU/GPU renderer. The SDK recommends WC Garlic for the
+    // GPU-accessed block; Onion is used for the CPU working areas above.
     if (dm.maxFrameBufferSize > 0) {
         const size_t align = dm.frameBufferAlignment ? dm.frameBufferAlignment
                                                      : kFrameBufferAlignment;
         const size_t need = (static_cast<size_t>(dm.maxFrameBufferSize) + align - 1) &
                             ~(align - 1);
         const size_t total = need * kFrameBufferCount;
-        if (!m_impl->frameBufferMem.allocate(total, kDmemTypeOnion, kDmemProt)) {
+        if (!m_impl->frameBufferMem.allocate(total, kDmemTypeGarlic, kDmemProt)) {
             return VideoDecoderResult(VideoDecoderResultCategory::DecoderResourceFailure);
         }
         for (size_t i = 0; i < kFrameBufferCount; ++i) {
@@ -1244,6 +1569,33 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     }
     m_impl->decoder = dec;
 
+    // --- One-time decoder configuration dump (stream-issue diagnosis) -------
+    // Logs the exact configuration handed to the decoder core and the memory
+    // sizes it reserved. Useful when diagnosing decoder-core faults: it shows
+    // the configured level/DPB/frame dimensions alongside the queried memory
+    // sizes, so a stream-vs-config mismatch is visible in the klog.
+    {
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+                 "[video] decoder config: codec=%s profile=%u level=%u "
+                 "frame=%dx%d dpb=%d pipeline=%u",
+                 config.codec == VideoCodec::H265 ? "HEVC" : "H264",
+                 dc.profile, dc.maxLevel,
+                 dc.maxFrameWidth, dc.maxFrameHeight,
+                 dc.maxDpbFrameCount, dc.decodePipelineDepth);
+        vdDiagPrint(buf);
+
+        snprintf(buf, sizeof(buf),
+                 "[video] decoder memory: cpu=%llu gpu=%llu cpuGpu=%llu "
+                 "maxFrameBuffer=%llu align=%u",
+                 static_cast<unsigned long long>(dm.cpuMemorySize),
+                 static_cast<unsigned long long>(dm.gpuMemorySize),
+                 static_cast<unsigned long long>(dm.cpuGpuMemorySize),
+                 static_cast<unsigned long long>(dm.maxFrameBufferSize),
+                 dm.frameBufferAlignment);
+        vdDiagPrint(buf);
+    }
+
     // --- Store the active configuration --------------------------------------
     m_impl->config = config;
 
@@ -1258,6 +1610,8 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     m_impl->rtpTimestampBase = 0;
     m_impl->firstIdrLogged = false;
     m_impl->firstFrameLogged = false;
+    m_impl->firstDecodeResultLogged = false;
+    m_impl->firstDecodeErrorLogged = false;
     m_impl->encodedConsumed = 0;
     m_impl->framesDecoded = 0;
     m_impl->decodeErrors = 0;
@@ -1300,7 +1654,8 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
 
     char buf[160];
     snprintf(buf, sizeof(buf),
-             "[video] decoder initialized: H264 %ux%u @ %u fps",
+             "[video] decoder initialized: %s %ux%u @ %u fps",
+             config.codec == VideoCodec::H265 ? "HEVC" : "H264",
              config.width, config.height, config.fps);
     vdDiagPrint(buf);
 

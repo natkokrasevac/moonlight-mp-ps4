@@ -155,7 +155,7 @@ constexpr const char* kAppName = "Moonlight DX for PlayStation 4";
 /// Version label (Settings footer). Used by the Settings panel footer.
 constexpr const char* kVersionLabel = "fourletterworkshop.com";
 /// Version number (Settings footer). Used by the Settings panel footer.
-constexpr const char* kVersionNumber = "1.11";
+constexpr const char* kVersionNumber = "2.00";
 
 // --- Stream statistics row labels ------------------------------------------
 /// Resolution (statistics row label). Used by the StreamStatistics overlay.
@@ -164,6 +164,8 @@ constexpr const char* kStatResolution = "Stream Resolution";
 constexpr const char* kStatFps = "Stream FPS";
 /// Bitrate (statistics row label). Used by the StreamStatistics overlay.
 constexpr const char* kStatBitrate = "Stream Bitrate";
+/// Codec (statistics row label). Used by the StreamStatistics overlay.
+constexpr const char* kStatCodec = "Codec";
 /// Decode (statistics row label). Used by the StreamStatistics overlay.
 constexpr const char* kStatDecode = "Decode";
 /// Network (statistics row label). Used by the StreamStatistics overlay.

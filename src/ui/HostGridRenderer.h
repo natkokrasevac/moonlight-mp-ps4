@@ -158,13 +158,6 @@ public:
     /// Full-compose the Host List Grid screen for the given state into `comp`.
     void renderFull(const HostGridRenderState& state, ps4::UiCompositor& comp);
 
-    /// Recompose only the region `dirty` of the Host List Grid screen for the
-    /// given state. Pushes a clip equal to `dirty`, repaints the background,
-    /// and redraws every element that intersects the region. Produces the same
-    /// pixels as a full compose of the same state.
-    void renderRegion(const HostGridRenderState& state, ps4::UiCompositor& comp,
-                      const ps4::Rect& dirty);
-
     // --- Retained resources -------------------------------------------------
 
     /// The CPU-decoded host card artwork (host.png). Empty if unavailable.
@@ -213,9 +206,6 @@ private:
 
     /// Draw the BottomLegend into `comp`.
     void drawLegend(const HostGridRenderState& state, ps4::UiCompositor& comp);
-
-    /// True if two rectangles intersect.
-    static bool rectsIntersect(const ps4::Rect& a, const ps4::Rect& b);
 
     // --- State --------------------------------------------------------------
     ps4::FontRasterizer* m_fonts = nullptr;

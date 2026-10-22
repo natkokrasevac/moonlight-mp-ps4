@@ -230,20 +230,37 @@ void* AudioDecodeOutput::audioWorker(void* arg) {
 
     // Determine the session generation this worker will consume.
     //
-    // The audio worker is started before StreamSessionManager::start().
-    // Capture the current session generation and state. If a session is
-    // already active (Starting/Streaming), consume that session (generation
-    // == current). Otherwise, wait for the next session to start
-    // (generation == current + 1). This makes the wait/termination semantics
-    // session-specific.
+    // The audio worker is started before StreamSessionManager::start(), so at
+    // this point no session may be active yet. Rather than GUESSING the next
+    // generation (which races with StreamSessionManager::start() publishing
+    // the generation and the state as two separate atomics), wait until a
+    // session is actually active (Starting/Streaming) and then adopt its
+    // generation. StreamSessionManager::start() publishes the generation
+    // BEFORE the state, so once the state is observed as Starting/Streaming
+    // the generation for that session is guaranteed to be visible.
+    //
+    // This eliminates the race that previously caused intermittent total
+    // silence: the old code read the generation first and the state second,
+    // so it could observe the freshly-incremented generation with the stale
+    // Idle state and compute (curGen + 1) — one generation too high — then
+    // block in waitPopAudio() forever waiting for a session that never came.
     uint32_t targetGeneration = 0;
     if (impl->ssm != nullptr) {
-        uint32_t curGen = impl->ssm->currentSessionGeneration();
-        StreamSessionState s = impl->ssm->state();
-        targetGeneration = (s == StreamSessionState::Starting ||
-                            s == StreamSessionState::Streaming)
-                               ? curGen
-                               : curGen + 1;
+        for (;;) {
+            if (impl->stopRequested.load()) {
+                break;
+            }
+            StreamSessionState s = impl->ssm->state();
+            if (s == StreamSessionState::Starting ||
+                s == StreamSessionState::Streaming) {
+                targetGeneration = impl->ssm->currentSessionGeneration();
+                break;
+            }
+            // No session active yet. Wait briefly and re-check. The worker is
+            // started immediately before StreamSessionManager::start(), so
+            // this loop normally exits on the first or second iteration.
+            sceKernelUsleep(kWorkerIdleSleepUs);
+        }
         char buf[128];
         snprintf(buf, sizeof(buf),
                  "[audio] worker consuming session generation %u",
@@ -251,6 +268,13 @@ void* AudioDecodeOutput::audioWorker(void* arg) {
         adoDiagPrint(buf);
     }
     impl->sessionGeneration = targetGeneration;
+
+    // If stop was requested before any session became active, exit cleanly.
+    if (impl->stopRequested.load()) {
+        impl->state = AudioDecodeOutputState::Idle;
+        adoDiagPrint("[audio] worker stopped (no session)");
+        return nullptr;
+    }
 
     // --- Audio loop ---------------------------------------------------------
     // Consume EncodedAudioPacket objects from StreamSessionManager, decode

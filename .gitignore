@@ -2,7 +2,10 @@
 _build/
 build/
 _reference/
+_dev_assets/
 _sdk/
+_build*/
+shaders/psbc/
 
 # Files
 .DS_Store

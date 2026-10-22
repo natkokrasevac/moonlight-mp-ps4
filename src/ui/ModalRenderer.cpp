@@ -113,11 +113,6 @@ ps4::Rect ModalRenderer::choiceBounds(ModalKind kind) const {
                      static_cast<int>(choiceHeight) + 6};
 }
 
-bool ModalRenderer::rectsIntersect(const ps4::Rect& a, const ps4::Rect& b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x &&
-           a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -128,18 +123,16 @@ void ModalRenderer::renderFull(const ModalRenderState& state,
         return;
     }
 
-    // 1. Full-screen dim layer (translucent black). The base screen is already
-    //    present in the surface; the dim is composited over it.
-    comp.fillRect(0, 0, 1920, 1080, 0, 0, 0, UiTheme::kDimAlpha);   // ~0.55 alpha
-
-    // 2. Centered modal panel (opaque/semi-opaque).
+    // Centered modal panel (opaque/semi-opaque). No full-screen dim layer is
+    // applied (removed for the GPU UI path; modals draw directly over the base
+    // screen, consistent with PS UI presentation).
     const ps4::Rect panel = panelBounds(state.kind);
     comp.fillRect(panel.x, panel.y, panel.w, panel.h,
                   UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 250);
     comp.strokeRect(panel.x, panel.y, panel.w, panel.h, 2,
                     UiTheme::kPanelBorderR, UiTheme::kPanelBorderG, UiTheme::kPanelBorderB, 255);
 
-    // 3. Modal content.
+    // Modal content.
     switch (state.kind) {
     case ModalKind::DeleteHost:
         drawDeleteHostContent(state, comp);
@@ -154,49 +147,6 @@ void ModalRenderer::renderFull(const ModalRenderState& state,
         drawQuitAppContent(state, comp);
         break;
     }
-}
-
-void ModalRenderer::renderRegion(const ModalRenderState& state,
-                                 ps4::UiCompositor& comp,
-                                 const ps4::Rect& dirty) {
-    if (!m_fonts) {
-        return;
-    }
-    if (!comp.pushClip(dirty)) {
-        return;   // Empty clip; nothing to recompose.
-    }
-
-    // Repaint the panel background intersecting the dirty region. Choice
-    // buttons live inside the opaque panel, so the panel background is the
-    // base for choice recomposition (no dim handling needed inside the opaque
-    // panel).
-    const ps4::Rect panel = panelBounds(state.kind);
-    if (rectsIntersect(dirty, panel)) {
-        comp.fillRect(panel.x, panel.y, panel.w, panel.h,
-                      UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 250);
-        comp.strokeRect(panel.x, panel.y, panel.w, panel.h, 2,
-                        UiTheme::kPanelBorderR, UiTheme::kPanelBorderG, UiTheme::kPanelBorderB, 255);
-    }
-
-    // Redraw the choice buttons if they intersect the dirty region.
-    if (rectsIntersect(dirty, choiceBounds(state.kind))) {
-        switch (state.kind) {
-        case ModalKind::DeleteHost:
-            drawDeleteHostChoices(state, comp);
-            break;
-        case ModalKind::QuitApp:
-            drawQuitAppChoices(state, comp);
-            break;
-        case ModalKind::ResetMoonlight:
-            drawResetMoonlightChoices(state, comp);
-            break;
-        default:
-            drawQuitAppChoices(state, comp);
-            break;
-        }
-    }
-
-    comp.popClip();
 }
 
 // ---------------------------------------------------------------------------

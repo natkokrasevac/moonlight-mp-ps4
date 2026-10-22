@@ -54,6 +54,7 @@ struct StreamStatisticsRenderState {
     std::string resolution;      ///< e.g. "1920x1080".
     std::string fps;             ///< e.g. "60.0".
     std::string bitrate;         ///< e.g. "12.5".
+    std::string codec;           ///< e.g. "AVC (H.264)" / "HEVC (H.265)".
     std::string decodeTime;      ///< e.g. "3.2".
     std::string networkLatency;  ///< e.g. "8.0".
     std::string jitter;          ///< e.g. "1.5".
@@ -85,8 +86,6 @@ public:
     ps4::Rect rowBounds(int rowIndex) const;
 
     void render(const StreamStatisticsRenderState& state, ps4::UiCompositor& comp);
-    void renderRegion(const StreamStatisticsRenderState& state,
-                      ps4::UiCompositor& comp, const ps4::Rect& dirty);
 
 private:
     float panelX() const { return 64.0f; }
@@ -99,7 +98,6 @@ private:
     float rowTop(int rowIndex) const;
     void drawRow(const char* label, const std::string& value, int rowIndex,
                  float rowY, ps4::UiCompositor& comp);
-    static bool rectsIntersect(const ps4::Rect& a, const ps4::Rect& b);
 
     ps4::FontRasterizer* m_fonts = nullptr;
     bool m_initialized = false;

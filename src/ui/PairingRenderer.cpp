@@ -194,11 +194,6 @@ ps4::Rect PairingRenderer::bottomLegendBounds() const {
                      static_cast<int>(height)};
 }
 
-bool PairingRenderer::rectsIntersect(const ps4::Rect& a, const ps4::Rect& b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x &&
-           a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -212,40 +207,6 @@ void PairingRenderer::renderFull(const PairingRenderState& state,
     drawPanel(state, comp);
     drawSeparators(comp);
     drawLegend(state, comp);
-}
-
-void PairingRenderer::renderRegion(const PairingRenderState& state,
-                                   ps4::UiCompositor& comp,
-                                   const ps4::Rect& dirty) {
-    if (!m_fonts) {
-        return;
-    }
-    if (!comp.pushClip(dirty)) {
-        return;   // Empty clip; nothing to recompose.
-    }
-
-    // Repaint the background intersecting the dirty region (clipped to it).
-    drawBackground(comp, m_bgImg);
-
-    // Top bar if it intersects.
-    if (rectsIntersect(dirty, topBarBounds())) {
-        drawTopBar(comp);
-    }
-
-    // Panel if it intersects.
-    if (rectsIntersect(dirty, panelBounds())) {
-        drawPanel(state, comp);
-    }
-
-    // Separator lines if they intersect.
-    drawSeparators(comp);
-
-    // Bottom legend if it intersects.
-    if (rectsIntersect(dirty, bottomLegendBounds())) {
-        drawLegend(state, comp);
-    }
-
-    comp.popClip();
 }
 
 // ---------------------------------------------------------------------------

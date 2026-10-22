@@ -144,7 +144,8 @@ This is the **decode-throughput enabler** for 4K60.
   H.264/AVC).
 - Configure the Videodec2 decoder for HEVC (codec type, profile, level).
 - Verify the PS4 Pro's Videodec2 H.265 decode level supports 4K60.
-- Handle HEVC-specific SPS/PPS (the current SPS fixup is H.264-specific).
+- Handle HEVC-specific SPS/PPS (the decoder consumes the host's VPS/SPS/PPS
+  as-is; no bitstream rewrite is performed).
 
 ### 4.3 Stream negotiation
 

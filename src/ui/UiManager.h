@@ -152,8 +152,11 @@ struct UiInput {
 
 /// Minimal UI data contract for the Settings overlay.
 struct SettingsViewState {
-    int  resolutionIndex = 1;   ///< 0 = 720p, 1 = 1080p.
+    int  resolutionIndex = 1;   ///< 0 = 720p, 1 = 1080p, 2 = 4K.
     int  frameRateIndex = 1;    ///< 0 = 30 FPS, 1 = 60 FPS.
+    int  bitrateIndex = 2;      ///< 0 = 5, 1 = 10, 2 = 20, 3 = 40, 4 = 80 Mbps.
+    /// Codec index: 0 = Auto, 1 = AVC/H.264, 2 = HEVC/H.265.
+    int  codecIndex = 0;
     bool quitAppOnStreamExit = false;
     /// Presentation style index: 0 = PlayStation, 1 = Grid.
     int  presentationStyleIndex = 0;
@@ -178,6 +181,11 @@ struct SettingsRowRenderData {
     std::string value;
     bool selected = false;
     bool enabled = true;   ///< Disabled rows render dimmed and cannot be selected.
+    /// When true, the value exceeds the recommended value for the current
+    /// stream specs (e.g. a bitrate above the codec's Annex A MaxBR for the
+    /// resolution/fps). The renderer draws such values emphasized (orange,
+    /// bold) to flag the over-recommendation.
+    bool valueWarning = false;
 };
 
 /// Render snapshot for the CPU Settings overlay.
@@ -413,6 +421,9 @@ struct StreamStatisticsSnapshot {
     bool valid = false;
     int  width = 0;                ///< Actual stream width (pixels).
     int  height = 0;               ///< Actual stream height (pixels).
+    /// Active video codec display string (e.g. "AVC (H.264)" / "HEVC (H.265)").
+    /// Empty = unavailable (renders "N/A").
+    std::string codec;
     float fps = 0.0f;              ///< Measured decoded FPS (interval average).
     float decodeMs = 0.0f;         ///< Average decode time (ms, interval).
     float bitrateMbps = 0.0f;      ///< Measured encoded-video bitrate (Mbps, interval).
@@ -529,6 +540,18 @@ public:
     /// an app (Triangle) or before quitting-and-launching a different app.
     /// When false, quitting proceeds immediately without a dialog.
     void setShowQuitAppDialog(bool show);
+
+    /// Set whether 4K output is available (the current VideoOut resolution is
+    /// actually >1080p AND the PS4 Pro build is active). When false, the
+    /// Settings overlay's Resolution option cycles only 720p/1080p and never
+    /// offers 4K. When true, it also offers 4K.
+    void set4KAvailable(bool available);
+
+    /// Set whether HEVC/H.265 is available (the console is a PS4 Pro AND the
+    /// PS4 Pro build is active). When false, the Settings overlay's Codec
+    /// option cycles only Auto/AVC and never offers HEVC. When true, it also
+    /// offers HEVC.
+    void setHevcAvailable(bool available);
 
     /// Set the current grid column counts for the Host List and App List grid
     /// presentation modes.

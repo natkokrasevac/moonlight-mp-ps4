@@ -42,27 +42,9 @@
 
 #include "StreamSessionManager.h"
 #include "VideoDecoder.h"
-#include "SpsFixup.h"
 
 // --- moonlight-common-c (C) header — confined to this translation unit --------
 #include "Limelight.h"
-
-// ---------------------------------------------------------------------------
-// SPS fixup gate
-// ---------------------------------------------------------------------------
-// The SPS rewrite (num_ref_frames = 1) was added to address stale-macroblock
-// blockiness, but testing showed it did not change the artifacts. It is gated
-// here so it can be toggled independently of the frame-lifetime work (Phase 2).
-// Set to 1 to enable the SPS rewrite, 0 to pass the host's SPS through
-// unchanged.
-#ifndef ML_ENABLE_SPS_FIXUP
-// The SPS rewrite forces num_ref_frames = 1. With kDecodePipelineDepth = 2
-// (frame-parallel decode) and the AU input-buffer lifetime contract
-// (retainAu / retireExpiredAus) in place, the decoder correctly handles
-// reference frames without the SPS rewrite. Set to 1 to enable the SPS
-// rewrite, 0 to pass the host's SPS through unchanged.
-#define ML_ENABLE_SPS_FIXUP 1
-#endif
 
 // --- Native PS4 network API (proven OpenOrbis path) --------------------------
 #include <orbis/Net.h>         // sceNetInetPton, OrbisNetInAddr, ORBIS_NET_AF_INET
@@ -338,11 +320,12 @@ int ssmVideoSetup(int videoFormat, int width, int height, int redrawRate,
         static_cast<StreamSessionManager::Impl*>(context);
     (void)drFlags;
 
-    // Validate: only H.264 is supported (launch advertised H.264 only).
-    if (videoFormat != VIDEO_FORMAT_H264) {
+    // Validate: only H.264 and H.265/HEVC are supported (the launch advertises
+    // the selected codec). H.265/HEVC is only requested on a PS4 Pro.
+    if (videoFormat != VIDEO_FORMAT_H264 && videoFormat != VIDEO_FORMAT_H265) {
         char buf[128];
         snprintf(buf, sizeof(buf),
-                 "[stream] video setup rejected: unsupported format 0x%x (H.264 only)",
+                 "[stream] video setup rejected: unsupported format 0x%x (H.264/H.265 only)",
                  videoFormat);
         ssmDiagPrint(buf);
 
@@ -363,28 +346,27 @@ int ssmVideoSetup(int videoFormat, int width, int height, int redrawRate,
 
     char buf[160];
     snprintf(buf, sizeof(buf),
-             "[stream] video setup: format=H264 %dx%d @ %d fps",
+             "[stream] video setup: format=%s %dx%d @ %d fps",
+             videoFormat == VIDEO_FORMAT_H265 ? "HEVC" : "H264",
              width, height, redrawRate);
     ssmDiagPrint(buf);
 
-    // --- Initialize the SPS fixup for this stream resolution ----------------
-    // The SPS rewrite forces num_ref_frames = 1 so the reversed Videodec2
-    // decoder never hits a reference-frame / DPB mismatch with the host's SPS
-    // (which otherwise produces stale-macroblock blockiness in gradients).
-    // Gated by ML_ENABLE_SPS_FIXUP (default OFF — testing showed it did not
-    // change the artifacts).
-#if ML_ENABLE_SPS_FIXUP
-    ml::spsFixupInit(width, height);
-#endif
-
     // --- Forward to the VideoDecoder ----------------------------------------
-    // Start a decoder session with the negotiated video parameters.
+    // Start a decoder session with the negotiated video parameters. The codec
+    // is derived from the negotiated video format (H.265/HEVC on PS4 Pro).
     if (impl->videoDecoder != nullptr) {
         ml::VideoDecoderConfiguration vdConfig;
         vdConfig.width = static_cast<uint32_t>(width);
         vdConfig.height = static_cast<uint32_t>(height);
         vdConfig.fps = static_cast<uint32_t>(redrawRate);
-        vdConfig.codec = ml::VideoCodec::H264;
+        // Requested stream bitrate (kbps). The decoder selects a level high
+        // enough to cover this bitrate so the configured level always exceeds
+        // the stream (otherwise the decoder core rejects it with
+        // SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE).
+        vdConfig.bitrateKbps = static_cast<uint32_t>(impl->activeSession.configuration.bitrate);
+        vdConfig.codec = (videoFormat == VIDEO_FORMAT_H265)
+                             ? ml::VideoCodec::H265
+                             : ml::VideoCodec::H264;
         vdConfig.colorSpace = static_cast<uint32_t>(impl->activeSession.configuration.colorSpace);
         vdConfig.colorRange = static_cast<uint32_t>(impl->activeSession.configuration.colorRange);
 
@@ -474,7 +456,12 @@ int ssmVideoSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     ml::EncodedVideoUnit unit;
     unit.frameNumber = static_cast<uint64_t>(decodeUnit->frameNumber);
     unit.frameType = static_cast<uint32_t>(decodeUnit->frameType);
-    unit.codecType = 0x01;  // VIDEO_FORMAT_H264
+    // Set the codec type from the negotiated video format. H.264 = 0x01;
+    // H.265/HEVC = 0xEE049 (the Videodec2 HEVC codec type). The decoder
+    // validates the unit against the active codec.
+    unit.codecType = (owner->negotiatedVideoFormat == VIDEO_FORMAT_H265)
+                         ? 0xEE049u
+                         : 0x01u;
     unit.rtpTimestamp = decodeUnit->rtpTimestamp;
     unit.presentationTimeUs = decodeUnit->presentationTimeUs;
     unit.fullLength = static_cast<uint32_t>(decodeUnit->fullLength);
@@ -486,45 +473,23 @@ int ssmVideoSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     }
     unit.fragmentCount = fragmentCount;
 
-    // Copy the buffer chain into the contiguous AU. When ML_ENABLE_SPS_FIXUP
-    // is enabled, the SPS NAL is rewritten in place (num_ref_frames = 1)
-    // before assembly; the rewrite can slightly lengthen the NAL, so reserve
-    // extra slack. When disabled (default), the host's SPS is passed through
-    // unchanged.
-    unit.data.reserve(static_cast<size_t>(decodeUnit->fullLength) + 128);
+    // Copy the buffer chain into the contiguous AU. The host's SPS/PPS/VPS
+    // are passed through unchanged.
+    unit.data.reserve(static_cast<size_t>(decodeUnit->fullLength));
     for (PLENTRY e = decodeUnit->bufferList; e != nullptr; e = e->next) {
         if (e->data == nullptr || e->length <= 0) {
             continue;
         }
-#if ML_ENABLE_SPS_FIXUP
-        if (e->bufferType == BUFFER_TYPE_SPS) {
-            // Rewrite the SPS to force a single reference frame.
-            uint8_t spsScratch[256];
-            uint32_t spsOff = 0;
-            ml::spsFixup(e, ml::SPS_FIXUP_BITSTREAM, spsScratch, &spsOff);
-            if (spsOff > 0) {
-                unit.data.insert(unit.data.end(), spsScratch, spsScratch + spsOff);
-                continue;
-            }
-            // Fall through to the original bytes if the rewrite failed.
-        }
-#endif
         unit.data.insert(unit.data.end(),
                          reinterpret_cast<const uint8_t*>(e->data),
                          reinterpret_cast<const uint8_t*>(e->data) + e->length);
     }
 
-    // Verify the assembled length is sane (the SPS rewrite may change the
-    // length, so allow a small delta from the declared fullLength).
-    if (unit.data.size() < unit.fullLength ||
-        unit.data.size() > static_cast<size_t>(unit.fullLength) + 128) {
+    // Verify the assembled length matches the declared fullLength.
+    if (unit.data.size() != unit.fullLength) {
         // Mismatch — discard and request IDR.
         return DR_NEED_IDR;
     }
-
-    // Update fullLength to the actual assembled size (the SPS rewrite can
-    // change the NAL length; the decoder validates data.size() == fullLength).
-    unit.fullLength = static_cast<uint32_t>(unit.data.size());
 
     // Accumulate the received encoded-video bytes for the statistics overlay.
     // This is a project-owned counter (not a moonlight-common-c patch); it
@@ -1002,8 +967,9 @@ StreamSessionResult StreamSessionManager::start(StreamSessionDescriptor&& sessio
         cfg.packetSize < 1 || cfg.packetSize > 65535) {
         return StreamSessionResult(StreamSessionResultCategory::ConfigurationFailure);
     }
-    // H.264 must be advertised.
-    if ((cfg.videoFormatMask & 0x0001) == 0) {
+    // H.264 or H.265 must be advertised.
+    if ((cfg.videoFormatMask & 0x0001) == 0 &&
+        (cfg.videoFormatMask & 0x0100) == 0) {
         return StreamSessionResult(StreamSessionResultCategory::ConfigurationFailure);
     }
     // Audio configuration magic byte must be 0xCA.
@@ -1237,6 +1203,10 @@ StreamSessionState StreamSessionManager::state() const {
 
 uint64_t StreamSessionManager::rxBytes() const {
     return m_impl ? m_impl->statsRxBytes.load(std::memory_order_relaxed) : 0;
+}
+
+int StreamSessionManager::negotiatedVideoFormat() const {
+    return m_impl ? m_impl->negotiatedVideoFormat : 0;
 }
 
 bool StreamSessionManager::readNetworkStats(float& rttMs, float& jitterMs) const {

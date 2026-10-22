@@ -91,6 +91,7 @@ public:
         Title        = 3,   ///< Noto Sans Regular (bound at kTitleFontSize) — window titles.
         BoldSmall    = 4,   ///< Noto Sans Regular (bound at kBoldSmallFontSize) — non-focused card names.
         RegularSmall = 5,   ///< Noto Sans ExtraLight (bound at kRegularSmallFontSize) — smaller regular text.
+        RegularBold  = 6,   ///< Noto Sans Regular (bound at kBoldFontSize) — body-size bold for emphasized values.
     };
 
     /// Measure the total advance width (including kerning) of an ASCII string

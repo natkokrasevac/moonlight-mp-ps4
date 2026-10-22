@@ -8,6 +8,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ---------------------------------------------------
+# Output target name (passed from the Makefile)
+# ---------------------------------------------------
+# The Makefile computes PKG_NAME = <project>_<version> and passes it here
+# so the output elf name matches the Makefile's expectations. When not
+# provided (e.g., direct cmake invocation), falls back to PROJECT_NAME.
+set(ML_TARGET_NAME "${PROJECT_NAME}" CACHE STRING "Output target name (from Makefile PKG_NAME)")
+
 # Toolchain paths
 set(OO_TOOLCHAIN $ENV{OO_PS4_TOOLCHAIN})
 
@@ -121,26 +129,6 @@ add_subdirectory(third_party/opus)
 target_compile_options(opus PRIVATE -O2)
 
 # ---------------------------------------------------
-# h264bitstream (SPS rewrite for the H.264 decoder)
-# ---------------------------------------------------
-# Parses and re-serializes the H.264 Sequence Parameter Set so the decoder
-# can be forced to a known-good reference-frame configuration (num_ref_frames
-# = 1). Only the NAL/SEI/stream parsing units are needed for the SPS fixup;
-# the slice-data and avcc units are not used. We skip h264bitstream's own
-# CMakeLists (it uses FILE_SET / cmake 3.23 features) and build it directly.
-add_library(h264bitstream STATIC
-    third_party/h264bitstream/h264_nal.c
-    third_party/h264bitstream/h264_sei.c
-    third_party/h264bitstream/h264_stream.c
-)
-target_include_directories(h264bitstream PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h264bitstream
-)
-# The OpenOrbis clang toolchain flags warnings as errors; h264bitstream has
-# unused-parameter / sign-compare warnings we do not want to fix upstream.
-target_compile_options(h264bitstream PRIVATE -Wno-unused-parameter -Wno-sign-compare)
-
-# ---------------------------------------------------
 # PS4 client source
 # ---------------------------------------------------
 
@@ -149,14 +137,14 @@ file(GLOB_RECURSE CLIENT_SRC CONFIGURE_DEPENDS
     "src/*.cpp"
 )
 
-add_executable(${PROJECT_NAME}.elf ${CLIENT_SRC})
+add_executable(${ML_TARGET_NAME}.elf ${CLIENT_SRC})
 
 # Centralize the _GNU_SOURCE workaround. The OpenOrbis libc++ headers
 # (<atomic>/<__threading_support>) reference nanosleep without declaring it;
 # the OpenOrbis <time.h> only declares nanosleep when a POSIX/GNU feature-test
 # macro is defined. Defining _GNU_SOURCE at the target level resolves this for
 # every translation unit (including the new threaded DiscoveryManager).
-target_compile_definitions(${PROJECT_NAME}.elf PRIVATE _GNU_SOURCE)
+target_compile_definitions(${ML_TARGET_NAME}.elf PRIVATE _GNU_SOURCE)
 
 # GPU video renderer production path.
 # renderFrame() uses the real video_p.sb NV12→BGRA shader and binds the decoded
@@ -168,11 +156,10 @@ target_compile_definitions(${PROJECT_NAME}.elf PRIVATE _GNU_SOURCE)
 # single submission (renderFrameWithOverlay). No test macro is defined; the
 # production path is active.
 
-target_link_libraries(${PROJECT_NAME}.elf
+target_link_libraries(${ML_TARGET_NAME}.elf
     moonlight-common-c
     mbedtls_ps4
     opus
-    h264bitstream
     opengnm
     SceVideoOut
     SceGnmDriver
@@ -196,13 +183,12 @@ target_link_libraries(${PROJECT_NAME}.elf
     kernel
 )
 
-target_include_directories(${PROJECT_NAME}.elf PRIVATE
+target_include_directories(${ML_TARGET_NAME}.elf PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/config
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/moonlight-common-c/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/h264bitstream
     ${OO_TOOLCHAIN}/include
     ${OO_TOOLCHAIN}/include/opengnm
 )

@@ -33,7 +33,8 @@ Texture2D    texUV : register(t1);
 ConstantBuffer cb_video : register(b0)
 {
     float4 yuvOffset;    // (16/255, 128/255, 128/255, 0) limited-range offsets
-    float4 uvScale;      // (1.0, 1.0, 0, 0) full UV plane coverage
+    float4 uvScale;      // (visibleWidth/pitch, 1, 0, 0) visible fraction of the
+                         //   pitch-wide Y/UV textures (see below)
     float4 uvOffset;     // (0, 0, 0, 0)
     float4 chromaOffset; // half-UV-texel chroma-siting correction
     float4 coeffR;       // R = lumaScale*Y + crR*V
@@ -46,11 +47,20 @@ struct PS_INPUT {
 };
 
 float4 main(PS_INPUT input) : S_TARGET_OUTPUT0 {
-    // Sample luma at the interpolated UV.
-    float y = texY.Sample(smpY, input.uv).r;
+    // The Y and UV textures are created with their WIDTH equal to the decoder
+    // row pitch (in texels), which is >= the visible width. For a
+    // GNM_ARRAY_LINEAR_GENERAL texture the GPU derives the row stride from the
+    // texture width, so this is required for the rows to be read at the
+    // decoder's true pitch. uvScale.x = visibleWidth / pitch maps the [0,1]
+    // viewport UV onto only the leftmost visible fraction of the texture.
+    // (The same ratio applies to the UV plane: (width/2)/(pitch/2).)
+    float2 yCoord = input.uv * uvScale.xy;
+
+    // Sample luma at the scaled UV.
+    float y = texY.Sample(smpY, yCoord).r;
 
     // Compute the 4:2:0 chroma coordinate for this pixel. The UV plane is
-    // half the Y resolution in each axis. uvScale maps the full UV plane;
+    // half the Y resolution in each axis. uvScale maps the visible fraction;
     // chromaOffset applies the half-UV-texel chroma-siting correction.
     float2 uvCoord = input.uv * uvScale.xy + uvOffset.xy + chromaOffset.xy;
     float2 uv = texUV.Sample(smpUV, uvCoord).rg;   // uv.r = U, uv.g = V

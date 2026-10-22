@@ -278,11 +278,6 @@ ps4::Rect HostGridRenderer::gridViewportBounds() const {
                      static_cast<int>(v.w), static_cast<int>(v.h)};
 }
 
-bool HostGridRenderer::rectsIntersect(const ps4::Rect& a, const ps4::Rect& b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x &&
-           a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -305,47 +300,6 @@ void HostGridRenderer::renderFull(const HostGridRenderState& state,
     }
 
     drawLegend(state, comp);
-}
-
-void HostGridRenderer::renderRegion(const HostGridRenderState& state,
-                                    ps4::UiCompositor& comp,
-                                    const ps4::Rect& dirty) {
-    if (!comp.pushClip(dirty)) {
-        return;   // Empty clip; nothing to recompose.
-    }
-
-    // Repaint the background intersecting the dirty region (clipped to it).
-    drawBackground(comp, m_bgImg);
-
-    // Top bar if it intersects.
-    if (rectsIntersect(dirty, topBarBounds())) {
-        drawTopBar(comp);
-    }
-
-    // Separator lines if they intersect.
-    drawSeparators(comp);
-
-    // Every card that intersects the dirty region. Cards are additionally
-    // clipped to the grid viewport so nothing draws outside the grid region
-    // (a card partially scrolled off the grid must not paint over the top bar
-    // or legend). The grid viewport clip is nested inside the dirty clip.
-    const ps4::Rect gv = gridViewportBounds();
-    if (rectsIntersect(dirty, gv) && comp.pushClip(gv)) {
-        for (int i = 0; i < static_cast<int>(state.hosts.size()); ++i) {
-            const ps4::Rect cb = cardVisualBounds(i, state);
-            if (rectsIntersect(dirty, cb)) {
-                drawCard(state.hosts[i], i, state, comp);
-            }
-        }
-        comp.popClip();
-    }
-
-    // Bottom legend if it intersects.
-    if (rectsIntersect(dirty, bottomLegendBounds())) {
-        drawLegend(state, comp);
-    }
-
-    comp.popClip();
 }
 
 // ---------------------------------------------------------------------------

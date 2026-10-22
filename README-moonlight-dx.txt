@@ -1,6 +1,6 @@
 MOONLIGHT DX FOR PLAYSTATION 4
 ==============================
-Version 1.11
+Version 2.00
 
 This is an unofficial Moonlight client for PlayStation 4. The DX stands for Deluxe :)
 
@@ -10,7 +10,9 @@ https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4
 Features
 ~~~~~~~~
 - All common Moonlight client features, incl. mDNS discovery
-- Fully GPU accelerated video pipeline
+- PS4 Pro support with HEVC and true 4K video pipeline
+- Fully GPU-accelerated (stream and UI) - console should stay cool(er)
+- Automatic bitrate recommendation (Moonlight convention)
 - PlayStation 4 inspired UI, choose between CrossBar and classic Grid presentation
 - OrbisOS controller limitation adaptation for in-stream controls
 - Keyboard and Mouse pass-through
@@ -37,7 +39,6 @@ via FTP:
 Using
 ~~~~~
 The client has built-in help functions and overlays, so it should be easy to use.
-
 
 License
 ~~~~~~~

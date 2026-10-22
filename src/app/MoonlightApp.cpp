@@ -42,7 +42,7 @@
 #include "platform/ps4/NetworkManager.h"
 #include "platform/ps4/FontRasterizer.h"   // CPU font rasterizer.
 #include "platform/ps4/UiCompositor.h"     // CPU UI compositor.
-#include "platform/ps4/UiBlitter.h"        // Dedicated GPU UI blitter.
+#include "platform/ps4/GpuUiRenderer.h"    // GPU fullscreen UI compositor.
 #include "platform/ps4/UiSoundManager.h"   // UI navigation sound manager.
 #include "platform/ps4/SysmoduleManager.h" // PS4 sysmodule lifecycle owner.
 #include "platform/ps4/ImeDialog.h"        // PS4 system on-screen keyboard.
@@ -180,7 +180,7 @@ MoonlightApp::MoonlightApp()
     , m_fontRasterizer(new ps4::FontRasterizer())
     , m_uiCompositor(new ps4::UiCompositor())
     , m_overlayCompositor(new ps4::UiCompositor())
-    , m_uiBlitter(new ps4::UiBlitter())
+    , m_gpuUiRenderer(new ps4::GpuUiRenderer())
     , m_gpuVideoRenderer(new ps4::GpuVideoRenderer())
     , m_bootRenderer(new ui::BootRenderer())
     , m_hostListRenderer(new ui::HostListRenderer())
@@ -417,6 +417,23 @@ AppResult MoonlightApp::initialize() {
         diagPrint(buf);
     }
 
+    // 3b. Cache the PS4 Pro / 4K capability gates.
+    //     These are INDEPENDENT:
+    //       - isPro()       = isNeoMode()  (drives H.265/HEVC decode, codec)
+    //       - is4KEnabled() = is4KOutput() (drives framebuffer, UI, video)
+    m_isPro = m_gfx->isPro();
+    m_is4KEnabled = m_gfx->is4KEnabled();
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "[app] PS4 Pro: pro=%s 4kEnabled=%s (neo=%d 4kOut=%d)",
+                 m_isPro ? "YES" : "no",
+                 m_is4KEnabled ? "YES" : "no",
+                 m_gfx->isNeoMode() ? 1 : 0,
+                 m_gfx->is4KOutput() ? 1 : 0);
+        diagPrint(buf);
+    }
+
     // 4. Initialize the FontRasterizer.
     if (!m_fontRasterizer->initialize()) {
         diagPrint("[app] FontRasterizer initialize failed");
@@ -460,20 +477,21 @@ AppResult MoonlightApp::initialize() {
            static_cast<size_t>(m_overlayCompositor->width()) *
                m_overlayCompositor->height() * 4u);
 
-    // 6. Initialize the UiBlitter.
-    ps4::GfxResult blitInit = m_uiBlitter->initialize(m_gfx.get());
-    if (!blitInit.succeeded()) {
+    // 6. Initialize the GpuUiRenderer.
+    ps4::GpuUiResult gpuUiInit = m_gpuUiRenderer->initialize(
+        m_gfx->getFramebufferWidth(), m_gfx->getFramebufferHeight());
+    if (!gpuUiInit.succeeded()) {
         char buf[128];
         snprintf(buf, sizeof(buf),
-                 "[app] UiBlitter initialize failed: category=%d",
-                 static_cast<int>(blitInit.category));
+                 "[app] GpuUiRenderer initialize failed: category=%d",
+                 static_cast<int>(gpuUiInit.category));
         diagPrint(buf);
         transitionTo(LifecycleState::Stopping);
         transitionTo(LifecycleState::ShutDown);
         return AppResult(AppResultCategory::InitializationFailure,
-                         blitInit.nativeError);
+                         gpuUiInit.nativeError);
     }
-    diagPrint("[app] UiBlitter initialized");
+    diagPrint("[app] GpuUiRenderer initialized");
 
     // 7. Initialize the InputManager (controller/pad path).
     ps4::InputResult inputInit = m_input->initialize();
@@ -754,6 +772,16 @@ AppResult MoonlightApp::initialize() {
             m_settingsManager->settings().presentationStyle);
         m_ui->setShowQuitAppDialog(
             m_settingsManager->settings().showQuitAppDialog);
+    }
+    // Push whether 4K output is available so the Settings overlay only offers
+    // the 4K resolution option when the current output is actually 4K.
+    if (m_ui) {
+        m_ui->set4KAvailable(m_is4KEnabled);
+    }
+    // Push whether HEVC/H.265 is available so the Settings overlay only offers
+    // the HEVC codec option when the console is a PS4 Pro (isPro()).
+    if (m_ui) {
+        m_ui->setHevcAvailable(m_isPro);
     }
     m_ui->setButtonAssignment(m_input->isCrossAccept());
 
@@ -1204,8 +1232,8 @@ void MoonlightApp::shutdown() {
     if (m_input) {
         m_input->shutdown();
     }
-    if (m_uiBlitter) {
-        m_uiBlitter->shutdown();
+    if (m_gpuUiRenderer) {
+        m_gpuUiRenderer->shutdown();
     }
     if (m_overlayCompositor) {
         m_overlayCompositor->shutdown();
@@ -1976,7 +2004,7 @@ void MoonlightApp::render() {
             if (m_ui->buildBootRenderState(bootState)) {
                 m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
                 m_bootRenderer->render(bootState, *m_uiCompositor);
-                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                m_uiNeedsStage = true;
                 m_bootComposed = true;
                 diagPrint("[app] composed Boot screen");
             }
@@ -1991,11 +2019,17 @@ void MoonlightApp::render() {
         // Pairing screen: build the render state.
         ui::PairingRenderState state;
         if (m_ui->buildPairingRenderState(state)) {
-            if (!m_prevPairingValid) {
-                // First entry into Pairing: full compose.
+            // Full recompose on first entry OR when the state changes.
+            const bool changed =
+                !m_prevPairingValid ||
+                state.state != m_prevPairingState.state ||
+                state.pin != m_prevPairingState.pin ||
+                state.message != m_prevPairingState.message ||
+                state.hostName != m_prevPairingState.hostName;
+            if (changed) {
                 m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
                 m_pairingRenderer->renderFull(state, *m_uiCompositor);
-                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                m_uiNeedsStage = true;
                 m_prevPairingState = state;
                 m_prevPairingValid = true;
                 {
@@ -2004,23 +2038,6 @@ void MoonlightApp::render() {
                              "[app] composed Pairing screen (host='%s' state=%d)",
                              state.hostName.c_str(),
                              static_cast<int>(state.state));
-                    diagPrint(buf);
-                }
-            } else if (state.state != m_prevPairingState.state ||
-                       state.pin != m_prevPairingState.pin ||
-                       state.message != m_prevPairingState.message ||
-                       state.hostName != m_prevPairingState.hostName) {
-                // State/PIN/message/host change: recompose the panel region.
-                const ps4::Rect panelArea = m_pairingRenderer->panelBounds();
-                m_pairingRenderer->renderRegion(state, *m_uiCompositor, panelArea);
-                m_uiBlitter->addDirtyRect(panelArea, kWidth, kHeight);
-                m_prevPairingState = state;
-                {
-                    char buf[128];
-                    snprintf(buf, sizeof(buf),
-                             "[app] Pairing redraw (state=%d pin='%s')",
-                             static_cast<int>(state.state),
-                             state.pin.c_str());
                     diagPrint(buf);
                 }
             } else {
@@ -2046,20 +2063,18 @@ void MoonlightApp::render() {
         // no per-frame dirty recompose is needed.
         ui::HelpRenderState state;
         if (m_ui->buildHelpRenderState(state)) {
-            if (!m_prevHelpValid) {
-                // First entry into Help: full compose.
+            // Full recompose on first entry OR when the button assignment
+            // changes.
+            const bool helpChanged =
+                !m_prevHelpValid ||
+                state.crossIsAccept != m_prevHelpState.crossIsAccept;
+            if (helpChanged) {
                 m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
                 m_helpRenderer->renderFull(state, *m_uiCompositor);
-                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                m_uiNeedsStage = true;
                 m_prevHelpState = state;
                 m_prevHelpValid = true;
                 diagPrint("[app] composed Help screen");
-            } else if (state.crossIsAccept != m_prevHelpState.crossIsAccept) {
-                // Button-assignment change: recompose the legend.
-                const ps4::Rect legendArea = m_helpRenderer->bottomLegendBounds();
-                m_helpRenderer->renderRegion(state, *m_uiCompositor, legendArea);
-                m_uiBlitter->addDirtyRect(legendArea, kWidth, kHeight);
-                m_prevHelpState = state;
             } else {
                 // No change: no recompose. prevHelpState stays current.
                 m_prevHelpState = state;
@@ -2067,28 +2082,25 @@ void MoonlightApp::render() {
 
             // --- Compose the Reset Moonlight confirmation modal ------------
             // If the Reset Moonlight confirmation dialog is open, compose it
-            // on top of the Help screen. Detect open/close and dirty the
-            // appropriate regions.
+            // on top of the Help screen. Detect open/close and state changes.
             const bool resetOpen = m_ui->isResetConfirmOpen();
             if (resetOpen || m_prevResetConfirmOpen) {
                 if (!resetOpen && m_prevResetConfirmOpen) {
                     // Close transition: restore the underlying Help screen.
-                    const ps4::Rect dim = m_modalRenderer->dimBounds();
-                    m_helpRenderer->renderRegion(state, *m_uiCompositor, dim);
-                    m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
+                    m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
+                    m_helpRenderer->renderFull(state, *m_uiCompositor);
+                    m_uiNeedsStage = true;
                     m_prevResetConfirmOpen = false;
                 } else if (resetOpen) {
                     ui::ModalRenderState modalState;
                     if (m_ui->buildModalRenderState(modalState)) {
-                        if (!m_prevResetConfirmOpen) {
-                            // Full open: compose the whole modal.
+                        // Full recompose on open or when the choice changes.
+                        const bool modalChanged =
+                            !m_prevResetConfirmOpen ||
+                            modalState.yesSelected != m_prevResetModalState.yesSelected;
+                        if (modalChanged) {
                             m_modalRenderer->renderFull(modalState, *m_uiCompositor);
-                            m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                        } else if (modalState.yesSelected != m_prevResetModalState.yesSelected) {
-                            // Choice change: dirty the choice button region.
-                            const ps4::Rect choice = m_modalRenderer->choiceBounds(modalState.kind);
-                            m_modalRenderer->renderRegion(modalState, *m_uiCompositor, choice);
-                            m_uiBlitter->addDirtyRect(choice, kWidth, kHeight);
+                            m_uiNeedsStage = true;
                         }
                         m_prevResetConfirmOpen = true;
                         m_prevResetModalState = modalState;
@@ -2116,160 +2128,137 @@ void MoonlightApp::render() {
             // --- Host List (crossbar) path ----------------------------------
             ui::HostListRenderState state;
             if (m_ui->buildHostListRenderState(state)) {
-                if (!m_prevHostListValid) {
-                    // First entry into Host List: full compose.
+                // Full recompose on first entry or when the visible scene
+                // changes. While an overlay is open, base changes are deferred
+                // until the overlay closes.
+                const bool firstEntry = !m_prevHostListValid;
+                ps4::Rect dirty[1];
+                const bool baseChanged =
+                    firstEntry ||
+                    hostListDirtyRects(m_prevHostListState, state, dirty, 1) > 0;
+
+                const bool settingsOpen = m_ui->isSettingsOpen();
+                const bool deleteOpen = m_ui->isDeleteConfirmOpen();
+                const bool addHostOpen = m_ui->isAddHostOpen() ||
+                                         m_ui->isAddHostStatusOpen();
+                const bool overlayOpen = settingsOpen || deleteOpen || addHostOpen;
+
+                // --- Detect overlay changes -------------------------------
+                bool settingsChanged = false;
+                ui::SettingsRenderState settingsState;
+                bool settingsStateValid = false;
+                if (settingsOpen) {
+                    settingsStateValid = m_ui->buildSettingsRenderState(settingsState);
+                    if (settingsStateValid) {
+                        if (settingsOpen != m_prevSettingsOpen) {
+                            settingsChanged = true;
+                        } else {
+                            ps4::Rect sdirty[8];
+                            settingsChanged =
+                                settingsDirtyRects(m_prevSettingsState,
+                                                   settingsState,
+                                                   m_prevSettingsOpen,
+                                                   settingsOpen,
+                                                   sdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevSettingsOpen) {
+                    settingsChanged = true;
+                }
+
+                bool deleteChanged = false;
+                ui::ModalRenderState deleteModalState;
+                bool deleteModalStateValid = false;
+                if (deleteOpen) {
+                    deleteModalStateValid = m_ui->buildModalRenderState(deleteModalState);
+                    if (deleteModalStateValid) {
+                        if (deleteOpen != m_prevDeleteConfirmOpen) {
+                            deleteChanged = true;
+                        } else {
+                            ps4::Rect mdirty[8];
+                            deleteChanged =
+                                modalDirtyRects(m_prevDeleteModalState,
+                                                deleteModalState,
+                                                m_prevDeleteConfirmOpen,
+                                                deleteOpen,
+                                                mdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevDeleteConfirmOpen) {
+                    deleteChanged = true;
+                }
+
+                bool addHostChanged = false;
+                ui::AddHostRenderState addHostState;
+                bool addHostStateValid = false;
+                if (addHostOpen) {
+                    addHostStateValid = m_ui->buildAddHostRenderState(addHostState);
+                    if (addHostStateValid) {
+                        if (addHostOpen != m_prevAddHostOpen) {
+                            addHostChanged = true;
+                        } else {
+                            ps4::Rect adirty[8];
+                            addHostChanged =
+                                addHostDirtyRects(m_prevAddHostState,
+                                                  addHostState,
+                                                  m_prevAddHostOpen,
+                                                  addHostOpen,
+                                                  adirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevAddHostOpen) {
+                    addHostChanged = true;
+                }
+
+                const bool overlayChanged =
+                    settingsChanged || deleteChanged || addHostChanged;
+                const bool shouldRecompose =
+                    firstEntry ||
+                    (!overlayOpen && baseChanged) ||
+                    overlayChanged;
+
+                if (shouldRecompose) {
                     m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
                     m_hostListRenderer->renderFull(state, *m_uiCompositor);
-                    m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                    if (settingsOpen && settingsStateValid) {
+                        m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
+                    }
+                    if (deleteOpen && deleteModalStateValid) {
+                        m_modalRenderer->renderFull(deleteModalState, *m_uiCompositor);
+                    }
+                    if (addHostOpen && addHostStateValid) {
+                        m_addHostRenderer->renderFull(addHostState, *m_uiCompositor);
+                    }
+                    m_uiNeedsStage = true;
+
+                    // Record the state that was just rendered.
                     m_prevHostListState = state;
                     m_prevHostListValid = true;
-                    // The underlying surface was just re-seeded (full compose).
-                    // If the Settings overlay is open, it must be fully
-                    // re-composed on top of the newly-seeded surface. Reset
-                    // m_prevSettingsOpen so the overlay is treated as freshly
-                    // opened (full compose) rather than doing a region
-                    // recompose that would leave the overlay missing/incomplete.
-                    m_prevSettingsOpen = false;
-                    {
+                    if (settingsOpen && settingsStateValid) {
+                        m_prevSettingsOpen = true;
+                        m_prevSettingsState = settingsState;
+                    } else if (!settingsOpen) {
+                        m_prevSettingsOpen = false;
+                    }
+                    if (deleteOpen && deleteModalStateValid) {
+                        m_prevDeleteConfirmOpen = true;
+                        m_prevDeleteModalState = deleteModalState;
+                    } else if (!deleteOpen) {
+                        m_prevDeleteConfirmOpen = false;
+                    }
+                    if (addHostOpen && addHostStateValid) {
+                        m_prevAddHostOpen = true;
+                        m_prevAddHostState = addHostState;
+                    } else if (!addHostOpen) {
+                        m_prevAddHostOpen = false;
+                    }
+
+                    if (firstEntry || (!overlayOpen && baseChanged)) {
                         char buf[128];
                         snprintf(buf, sizeof(buf),
                                  "[app] composed Host List (full, %zu cards)",
                                  state.cards.size());
                         diagPrint(buf);
-                    }
-                } else {
-                    // Compute dirty regions from the previous snapshot. This
-                    // detects selection moves, card content changes (availability,
-                    // pairing state, display name, app-running), and structural
-                    // changes (host added/removed), matching the SCE reference.
-                    ps4::Rect dirty[8];
-                    const int dirtyCount = hostListDirtyRects(
-                        m_prevHostListState, state, dirty, 8);
-                    if (dirtyCount > 0) {
-                        for (int i = 0; i < dirtyCount; ++i) {
-                            m_hostListRenderer->renderRegion(state, *m_uiCompositor, dirty[i]);
-                            m_uiBlitter->addDirtyRect(dirty[i], kWidth, kHeight);
-                        }
-                        m_prevHostListState = state;
-                        {
-                            char buf[128];
-                            snprintf(buf, sizeof(buf),
-                                     "[app] Host List redraw (%d rects, index %d, %zu cards)",
-                                     dirtyCount, state.selectedIndex, state.cards.size());
-                            diagPrint(buf);
-                        }
-                    } else {
-                        // No change: no recompose. prevHostListState stays current.
-                        m_prevHostListState = state;
-                    }
-                }
-
-                // --- Compose the Settings overlay ---------------------------
-                // If the Settings overlay is open, compose it on top of the CPU
-                // Host List. Detect open/close/selection/value changes and dirty
-                // the appropriate regions.
-                const bool settingsOpen = m_ui->isSettingsOpen();
-                if (settingsOpen || m_prevSettingsOpen) {
-                    if (!settingsOpen && m_prevSettingsOpen) {
-                        // Close transition: restore the underlying Host List.
-                        const ps4::Rect dim = m_settingsRenderer->dimBounds();
-                        m_hostListRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevSettingsOpen = false;
-                    } else if (settingsOpen) {
-                        ui::SettingsRenderState settingsState;
-                        if (m_ui->buildSettingsRenderState(settingsState)) {
-                            if (!m_prevSettingsOpen) {
-                                // Full open: compose the whole overlay.
-                                m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else {
-                                // Compute dirty regions from the previous snapshot.
-                                // On a selection change this dirties BOTH the old
-                                // and new selected row bounds so the previous
-                                // highlight is cleared and the new one is drawn.
-                                ps4::Rect sdirty[8];
-                                const int sdirtyCount = settingsDirtyRects(
-                                    m_prevSettingsState, settingsState,
-                                    m_prevSettingsOpen, settingsOpen, sdirty, 8);
-                                if (sdirtyCount > 0) {
-                                    for (int i = 0; i < sdirtyCount; ++i) {
-                                        m_settingsRenderer->renderRegion(settingsState, *m_uiCompositor, sdirty[i]);
-                                        m_uiBlitter->addDirtyRect(sdirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevSettingsOpen = true;
-                            m_prevSettingsState = settingsState;
-                        }
-                    }
-                }
-
-                // --- Compose the Delete Host confirmation modal -------------
-                const bool deleteOpen = m_ui->isDeleteConfirmOpen();
-                if (deleteOpen || m_prevDeleteConfirmOpen) {
-                    if (!deleteOpen && m_prevDeleteConfirmOpen) {
-                        // Close transition: restore the underlying Host List.
-                        const ps4::Rect dim = m_modalRenderer->dimBounds();
-                        m_hostListRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevDeleteConfirmOpen = false;
-                    } else if (deleteOpen) {
-                        ui::ModalRenderState modalState;
-                        if (m_ui->buildModalRenderState(modalState)) {
-                            if (!m_prevDeleteConfirmOpen) {
-                                // Full open: compose the whole modal.
-                                m_modalRenderer->renderFull(modalState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else if (modalState.yesSelected != m_prevDeleteModalState.yesSelected) {
-                                // Choice change: dirty the choice button region.
-                                const ps4::Rect choice = m_modalRenderer->choiceBounds(modalState.kind);
-                                m_modalRenderer->renderRegion(modalState, *m_uiCompositor, choice);
-                                m_uiBlitter->addDirtyRect(choice, kWidth, kHeight);
-                            }
-                            m_prevDeleteConfirmOpen = true;
-                            m_prevDeleteModalState = modalState;
-                        }
-                    }
-                }
-
-                // --- Compose the Add Host overlay / status modal ------------
-                const bool addHostOpen = m_ui->isAddHostOpen() ||
-                                         m_ui->isAddHostStatusOpen();
-                if (addHostOpen || m_prevAddHostOpen) {
-                    if (!addHostOpen && m_prevAddHostOpen) {
-                        // Close transition: restore the underlying Host List.
-                        const ps4::Rect dim = m_addHostRenderer->dimBounds();
-                        m_hostListRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevAddHostOpen = false;
-                    } else if (addHostOpen) {
-                        ui::AddHostRenderState addHostState;
-                        if (m_ui->buildAddHostRenderState(addHostState)) {
-                            if (!m_prevAddHostOpen) {
-                                // Full open: compose the whole overlay.
-                                m_addHostRenderer->renderFull(addHostState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else {
-                                // State change while open: recompose only the
-                                // dirty regions (field text, selection,
-                                // validation, status message). This avoids
-                                // re-applying the full-screen dim layer, which
-                                // would progressively darken the background.
-                                ps4::Rect adirty[8];
-                                const int adirtyCount = addHostDirtyRects(
-                                    m_prevAddHostState, addHostState,
-                                    m_prevAddHostOpen, addHostOpen, adirty, 8);
-                                if (adirtyCount > 0) {
-                                    for (int i = 0; i < adirtyCount; ++i) {
-                                        m_addHostRenderer->renderRegion(addHostState, *m_uiCompositor, adirty[i]);
-                                        m_uiBlitter->addDirtyRect(adirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevAddHostOpen = true;
-                            m_prevAddHostState = addHostState;
-                        }
                     }
                 }
             }
@@ -2277,161 +2266,137 @@ void MoonlightApp::render() {
             // --- Host List Grid path ----------------------------------------
             ui::HostGridRenderState state;
             if (m_ui->buildHostGridRenderState(state)) {
-                if (!m_prevHostGridValid) {
-                    // First entry into Host List Grid: full compose.
+                // Full recompose on first entry or when the visible scene
+                // changes. While an overlay is open, base changes are deferred
+                // until the overlay closes.
+                const bool firstEntry = !m_prevHostGridValid;
+                ps4::Rect dirty[1];
+                const bool baseChanged =
+                    firstEntry ||
+                    hostGridDirtyRects(m_prevHostGridState, state, dirty, 1) > 0;
+
+                const bool settingsOpen = m_ui->isSettingsOpen();
+                const bool deleteOpen = m_ui->isDeleteConfirmOpen();
+                const bool addHostOpen = m_ui->isAddHostOpen() ||
+                                         m_ui->isAddHostStatusOpen();
+                const bool overlayOpen = settingsOpen || deleteOpen || addHostOpen;
+
+                // --- Detect overlay changes -------------------------------
+                bool settingsChanged = false;
+                ui::SettingsRenderState settingsState;
+                bool settingsStateValid = false;
+                if (settingsOpen) {
+                    settingsStateValid = m_ui->buildSettingsRenderState(settingsState);
+                    if (settingsStateValid) {
+                        if (settingsOpen != m_prevSettingsOpen) {
+                            settingsChanged = true;
+                        } else {
+                            ps4::Rect sdirty[8];
+                            settingsChanged =
+                                settingsDirtyRects(m_prevSettingsState,
+                                                   settingsState,
+                                                   m_prevSettingsOpen,
+                                                   settingsOpen,
+                                                   sdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevSettingsOpen) {
+                    settingsChanged = true;
+                }
+
+                bool deleteChanged = false;
+                ui::ModalRenderState deleteModalState;
+                bool deleteModalStateValid = false;
+                if (deleteOpen) {
+                    deleteModalStateValid = m_ui->buildModalRenderState(deleteModalState);
+                    if (deleteModalStateValid) {
+                        if (deleteOpen != m_prevDeleteConfirmOpen) {
+                            deleteChanged = true;
+                        } else {
+                            ps4::Rect mdirty[8];
+                            deleteChanged =
+                                modalDirtyRects(m_prevDeleteModalState,
+                                                deleteModalState,
+                                                m_prevDeleteConfirmOpen,
+                                                deleteOpen,
+                                                mdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevDeleteConfirmOpen) {
+                    deleteChanged = true;
+                }
+
+                bool addHostChanged = false;
+                ui::AddHostRenderState addHostState;
+                bool addHostStateValid = false;
+                if (addHostOpen) {
+                    addHostStateValid = m_ui->buildAddHostRenderState(addHostState);
+                    if (addHostStateValid) {
+                        if (addHostOpen != m_prevAddHostOpen) {
+                            addHostChanged = true;
+                        } else {
+                            ps4::Rect adirty[8];
+                            addHostChanged =
+                                addHostDirtyRects(m_prevAddHostState,
+                                                  addHostState,
+                                                  m_prevAddHostOpen,
+                                                  addHostOpen,
+                                                  adirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevAddHostOpen) {
+                    addHostChanged = true;
+                }
+
+                const bool overlayChanged =
+                    settingsChanged || deleteChanged || addHostChanged;
+                const bool shouldRecompose =
+                    firstEntry ||
+                    (!overlayOpen && baseChanged) ||
+                    overlayChanged;
+
+                if (shouldRecompose) {
                     m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
                     m_hostGridRenderer->renderFull(state, *m_uiCompositor);
-                    m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                    if (settingsOpen && settingsStateValid) {
+                        m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
+                    }
+                    if (deleteOpen && deleteModalStateValid) {
+                        m_modalRenderer->renderFull(deleteModalState, *m_uiCompositor);
+                    }
+                    if (addHostOpen && addHostStateValid) {
+                        m_addHostRenderer->renderFull(addHostState, *m_uiCompositor);
+                    }
+                    m_uiNeedsStage = true;
+
+                    // Record the state that was just rendered.
                     m_prevHostGridState = state;
                     m_prevHostGridValid = true;
-                    // The underlying surface was just re-seeded (full compose).
-                    // If the Settings overlay is open, it must be fully
-                    // re-composed on top of the newly-seeded surface. Reset
-                    // m_prevSettingsOpen so the overlay is treated as freshly
-                    // opened (full compose) rather than doing a region
-                    // recompose that would leave the overlay missing/incomplete.
-                    m_prevSettingsOpen = false;
-                    {
+                    if (settingsOpen && settingsStateValid) {
+                        m_prevSettingsOpen = true;
+                        m_prevSettingsState = settingsState;
+                    } else if (!settingsOpen) {
+                        m_prevSettingsOpen = false;
+                    }
+                    if (deleteOpen && deleteModalStateValid) {
+                        m_prevDeleteConfirmOpen = true;
+                        m_prevDeleteModalState = deleteModalState;
+                    } else if (!deleteOpen) {
+                        m_prevDeleteConfirmOpen = false;
+                    }
+                    if (addHostOpen && addHostStateValid) {
+                        m_prevAddHostOpen = true;
+                        m_prevAddHostState = addHostState;
+                    } else if (!addHostOpen) {
+                        m_prevAddHostOpen = false;
+                    }
+
+                    if (firstEntry || (!overlayOpen && baseChanged)) {
                         char buf[128];
                         snprintf(buf, sizeof(buf),
                                  "[app] composed Host List Grid (full, %zu cards)",
                                  state.hosts.size());
                         diagPrint(buf);
-                    }
-                } else {
-                    // Compute dirty regions from the previous snapshot. This
-                    // detects selection moves, card content changes
-                    // (availability, pairing state, display name, app-running),
-                    // and structural changes (host added/removed), matching the
-                    // SCE reference.
-                    ps4::Rect dirty[8];
-                    const int dirtyCount = hostGridDirtyRects(
-                        m_prevHostGridState, state, dirty, 8);
-                    if (dirtyCount > 0) {
-                        for (int i = 0; i < dirtyCount; ++i) {
-                            m_hostGridRenderer->renderRegion(state, *m_uiCompositor, dirty[i]);
-                            m_uiBlitter->addDirtyRect(dirty[i], kWidth, kHeight);
-                        }
-                        m_prevHostGridState = state;
-                        {
-                            char buf[128];
-                            snprintf(buf, sizeof(buf),
-                                     "[app] Host List Grid redraw (%d rects, index %d, %zu cards)",
-                                     dirtyCount, state.selectedIndex, state.hosts.size());
-                            diagPrint(buf);
-                        }
-                    } else {
-                        // No change: no recompose. prevHostGridState stays current.
-                        m_prevHostGridState = state;
-                    }
-                }
-
-                // --- Compose the Settings overlay ---------------------------
-                // If the Settings overlay is open, compose it on top of the CPU
-                // Host List Grid. Detect open/close/selection/value changes and
-                // dirty the appropriate regions.
-                const bool settingsOpen = m_ui->isSettingsOpen();
-                if (settingsOpen || m_prevSettingsOpen) {
-                    if (!settingsOpen && m_prevSettingsOpen) {
-                        // Close transition: restore the underlying Host Grid.
-                        const ps4::Rect dim = m_settingsRenderer->dimBounds();
-                        m_hostGridRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevSettingsOpen = false;
-                    } else if (settingsOpen) {
-                        ui::SettingsRenderState settingsState;
-                        if (m_ui->buildSettingsRenderState(settingsState)) {
-                            if (!m_prevSettingsOpen) {
-                                // Full open: compose the whole overlay.
-                                m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else {
-                                // Compute dirty regions from the previous snapshot.
-                                // On a selection change this dirties BOTH the old
-                                // and new selected row bounds so the previous
-                                // highlight is cleared and the new one is drawn.
-                                ps4::Rect sdirty[8];
-                                const int sdirtyCount = settingsDirtyRects(
-                                    m_prevSettingsState, settingsState,
-                                    m_prevSettingsOpen, settingsOpen, sdirty, 8);
-                                if (sdirtyCount > 0) {
-                                    for (int i = 0; i < sdirtyCount; ++i) {
-                                        m_settingsRenderer->renderRegion(settingsState, *m_uiCompositor, sdirty[i]);
-                                        m_uiBlitter->addDirtyRect(sdirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevSettingsOpen = true;
-                            m_prevSettingsState = settingsState;
-                        }
-                    }
-                }
-
-                // --- Compose the Delete Host confirmation modal -------------
-                const bool deleteOpen = m_ui->isDeleteConfirmOpen();
-                if (deleteOpen || m_prevDeleteConfirmOpen) {
-                    if (!deleteOpen && m_prevDeleteConfirmOpen) {
-                        // Close transition: restore the underlying Host Grid.
-                        const ps4::Rect dim = m_modalRenderer->dimBounds();
-                        m_hostGridRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevDeleteConfirmOpen = false;
-                    } else if (deleteOpen) {
-                        ui::ModalRenderState modalState;
-                        if (m_ui->buildModalRenderState(modalState)) {
-                            if (!m_prevDeleteConfirmOpen) {
-                                // Full open: compose the whole modal.
-                                m_modalRenderer->renderFull(modalState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else if (modalState.yesSelected != m_prevDeleteModalState.yesSelected) {
-                                // Choice change: dirty the choice button region.
-                                const ps4::Rect choice = m_modalRenderer->choiceBounds(modalState.kind);
-                                m_modalRenderer->renderRegion(modalState, *m_uiCompositor, choice);
-                                m_uiBlitter->addDirtyRect(choice, kWidth, kHeight);
-                            }
-                            m_prevDeleteConfirmOpen = true;
-                            m_prevDeleteModalState = modalState;
-                        }
-                    }
-                }
-
-                // --- Compose the Add Host overlay / status modal ------------
-                const bool addHostOpen = m_ui->isAddHostOpen() ||
-                                         m_ui->isAddHostStatusOpen();
-                if (addHostOpen || m_prevAddHostOpen) {
-                    if (!addHostOpen && m_prevAddHostOpen) {
-                        // Close transition: restore the underlying Host Grid.
-                        const ps4::Rect dim = m_addHostRenderer->dimBounds();
-                        m_hostGridRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevAddHostOpen = false;
-                    } else if (addHostOpen) {
-                        ui::AddHostRenderState addHostState;
-                        if (m_ui->buildAddHostRenderState(addHostState)) {
-                            if (!m_prevAddHostOpen) {
-                                // Full open: compose the whole overlay.
-                                m_addHostRenderer->renderFull(addHostState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else {
-                                // State change while open: recompose only the
-                                // dirty regions (field text, selection,
-                                // validation, status message). This avoids
-                                // re-applying the full-screen dim layer, which
-                                // would progressively darken the background.
-                                ps4::Rect adirty[8];
-                                const int adirtyCount = addHostDirtyRects(
-                                    m_prevAddHostState, addHostState,
-                                    m_prevAddHostOpen, addHostOpen, adirty, 8);
-                                if (adirtyCount > 0) {
-                                    for (int i = 0; i < adirtyCount; ++i) {
-                                        m_addHostRenderer->renderRegion(addHostState, *m_uiCompositor, adirty[i]);
-                                        m_uiBlitter->addDirtyRect(adirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevAddHostOpen = true;
-                            m_prevAddHostState = addHostState;
-                        }
                     }
                 }
             }
@@ -2461,133 +2426,109 @@ void MoonlightApp::render() {
                 // Populate the resolved runtime artwork pointers into the
                 // render state. Null means fall back to app_fallback.png.
                 populateAppListArtwork(state);
-                if (!m_prevAppListValid) {
-                    // First entry into App List: full compose.
+
+                // Full recompose on first entry or when the visible scene
+                // changes. While an overlay is open, base changes are deferred
+                // until the overlay closes.
+                const bool firstEntry = !m_prevAppListValid;
+                ps4::Rect dirty[1];
+                const bool baseChanged =
+                    firstEntry ||
+                    appListDirtyRects(m_prevAppListState, state, dirty, 1) > 0;
+
+                const bool settingsOpen = m_ui->isSettingsOpen();
+                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen();
+                const bool overlayOpen = settingsOpen || quitAppOpen;
+
+                // --- Detect overlay changes -------------------------------
+                bool settingsChanged = false;
+                ui::SettingsRenderState settingsState;
+                bool settingsStateValid = false;
+                if (settingsOpen) {
+                    settingsStateValid = m_ui->buildSettingsRenderState(settingsState);
+                    if (settingsStateValid) {
+                        if (settingsOpen != m_prevSettingsOpen) {
+                            settingsChanged = true;
+                        } else {
+                            ps4::Rect sdirty[8];
+                            settingsChanged =
+                                settingsDirtyRects(m_prevSettingsState,
+                                                   settingsState,
+                                                   m_prevSettingsOpen,
+                                                   settingsOpen,
+                                                   sdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevSettingsOpen) {
+                    settingsChanged = true;
+                }
+
+                bool quitChanged = false;
+                ui::ModalRenderState quitModalState;
+                bool quitModalStateValid = false;
+                if (quitAppOpen) {
+                    quitModalStateValid = m_ui->buildModalRenderState(quitModalState);
+                    if (quitModalStateValid) {
+                        if (quitAppOpen != m_prevQuitAppOpen) {
+                            quitChanged = true;
+                        } else {
+                            ps4::Rect mdirty[8];
+                            quitChanged =
+                                modalDirtyRects(m_prevQuitModalState,
+                                                quitModalState,
+                                                m_prevQuitAppOpen,
+                                                quitAppOpen,
+                                                mdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevQuitAppOpen) {
+                    quitChanged = true;
+                }
+
+                const bool overlayChanged = settingsChanged || quitChanged;
+                const bool shouldRecompose =
+                    firstEntry ||
+                    (!overlayOpen && baseChanged) ||
+                    overlayChanged;
+
+                if (shouldRecompose) {
                     m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
                     m_appListRenderer->renderFull(state, *m_uiCompositor);
-                    m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                    if (settingsOpen && settingsStateValid) {
+                        m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
+                    }
+                    if (quitAppOpen && quitModalStateValid) {
+                        m_modalRenderer->renderFull(quitModalState, *m_uiCompositor);
+                    }
+                    m_uiNeedsStage = true;
+
+                    // Record the state that was just rendered.
                     m_prevAppListState = state;
                     m_prevAppListValid = true;
-                    // The underlying surface was just re-seeded (full compose).
-                    // If the Settings overlay is open, it must be fully
-                    // re-composed on top of the newly-seeded surface. Reset
-                    // m_prevSettingsOpen so the overlay is treated as freshly
-                    // opened (full compose) rather than doing a region
-                    // recompose that would leave the overlay missing/incomplete.
-                    m_prevSettingsOpen = false;
-                    {
+                    if (settingsOpen && settingsStateValid) {
+                        m_prevSettingsOpen = true;
+                        m_prevSettingsState = settingsState;
+                    } else if (!settingsOpen) {
+                        m_prevSettingsOpen = false;
+                    }
+                    if (quitAppOpen && quitModalStateValid) {
+                        m_prevQuitAppOpen = true;
+                        m_prevQuitModalState = quitModalState;
+                    } else if (!quitAppOpen) {
+                        m_prevQuitAppOpen = false;
+                    }
+
+                    if (firstEntry || (!overlayOpen && baseChanged)) {
                         char buf[128];
                         snprintf(buf, sizeof(buf),
                                  "[app] composed App List (full, %zu cards)",
                                  state.cards.size());
                         diagPrint(buf);
                     }
-                } else {
-                    // Compute dirty regions from the previous snapshot. This
-                    // detects selection moves, per-card content changes
-                    // (running, connecting, quitting, title, artwork), and
-                    // structural changes (app added/removed), matching the
-                    // Host List dirty-region behavior.
-                    ps4::Rect dirty[8];
-                    const int dirtyCount = appListDirtyRects(
-                        m_prevAppListState, state, dirty, 8);
-                    if (dirtyCount > 0) {
-                        for (int i = 0; i < dirtyCount; ++i) {
-                            m_appListRenderer->renderRegion(state, *m_uiCompositor, dirty[i]);
-                            m_uiBlitter->addDirtyRect(dirty[i], kWidth, kHeight);
-                        }
-                        m_prevAppListState = state;
-                        {
-                            char buf[128];
-                            snprintf(buf, sizeof(buf),
-                                     "[app] App List redraw (%d rects, index %d, %zu cards)",
-                                     dirtyCount, state.selectedIndex, state.cards.size());
-                            diagPrint(buf);
-                        }
-                    } else {
-                        // No change: no recompose. prevAppListState stays current.
-                        m_prevAppListState = state;
-                    }
-                }
-
-                // --- Compose the Settings overlay on top of the App List ----
-                const bool settingsOpen = m_ui->isSettingsOpen();
-                if (settingsOpen || m_prevSettingsOpen) {
-                    if (!settingsOpen && m_prevSettingsOpen) {
-                        const ps4::Rect dim = m_settingsRenderer->dimBounds();
-                        m_appListRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevSettingsOpen = false;
-                    } else if (settingsOpen) {
-                        ui::SettingsRenderState settingsState;
-                        if (m_ui->buildSettingsRenderState(settingsState)) {
-                            if (!m_prevSettingsOpen) {
-                                m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else {
-                                // Compute dirty regions from the previous
-                                // snapshot. On a selection change this dirties
-                                // BOTH the old and new selected row bounds so
-                                // the previous highlight is cleared and the
-                                // new one is drawn.
-                                ps4::Rect sdirty[8];
-                                const int sdirtyCount = settingsDirtyRects(
-                                    m_prevSettingsState, settingsState,
-                                    m_prevSettingsOpen, settingsOpen, sdirty, 8);
-                                if (sdirtyCount > 0) {
-                                    for (int i = 0; i < sdirtyCount; ++i) {
-                                        m_settingsRenderer->renderRegion(settingsState, *m_uiCompositor, sdirty[i]);
-                                        m_uiBlitter->addDirtyRect(sdirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevSettingsOpen = true;
-                            m_prevSettingsState = settingsState;
-                        }
-                    }
-                }
-
-                // --- Compose the Quit App confirmation dialog --------------
-                // If the quit-app confirmation dialog is open, compose it on
-                // top of the App List. Detect open/close and dirty the
-                // appropriate regions.
-                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen();
-                if (quitAppOpen || m_prevQuitAppOpen) {
-                    if (!quitAppOpen && m_prevQuitAppOpen) {
-                        // Close transition: restore the underlying App List.
-                        const ps4::Rect dim = m_modalRenderer->dimBounds();
-                        m_appListRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevQuitAppOpen = false;
-                    } else if (quitAppOpen) {
-                        ui::ModalRenderState modalState;
-                        if (m_ui->buildModalRenderState(modalState)) {
-                            ps4::Rect mdirty[8];
-                            const int mdirtyCount = modalDirtyRects(
-                                m_prevQuitModalState, modalState,
-                                m_prevQuitAppOpen, quitAppOpen,
-                                mdirty, 8);
-                            if (mdirtyCount > 0) {
-                                if (!m_prevQuitAppOpen) {
-                                    // Full open: compose the whole modal.
-                                    m_modalRenderer->renderFull(modalState, *m_uiCompositor);
-                                    m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                                } else {
-                                    // Choice change while open.
-                                    for (int i = 0; i < mdirtyCount; ++i) {
-                                        m_modalRenderer->renderRegion(modalState, *m_uiCompositor, mdirty[i]);
-                                        m_uiBlitter->addDirtyRect(mdirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevQuitAppOpen = true;
-                            m_prevQuitModalState = modalState;
-                        }
-                    }
                 }
             }
-            // The artwork-dirty set has been consumed by the dirty-region
-            // computation above; clear it for the next frame.
+            // The artwork-dirty set has been consumed by the change detection
+            // above; clear it for the next frame.
             m_artworkDirtyApps.clear();
         } else {
             // --- App List Grid path -----------------------------------------
@@ -2596,133 +2537,109 @@ void MoonlightApp::render() {
                 // Populate the resolved runtime artwork pointers into the
                 // render state. Null means fall back to app_fallback.png.
                 populateAppGridArtwork(state);
-                if (!m_prevAppGridValid) {
-                    // First entry into App List Grid: full compose.
+
+                // Full recompose on first entry or when the visible scene
+                // changes. While an overlay is open, base changes are deferred
+                // until the overlay closes.
+                const bool firstEntry = !m_prevAppGridValid;
+                ps4::Rect dirty[1];
+                const bool baseChanged =
+                    firstEntry ||
+                    appGridDirtyRects(m_prevAppGridState, state, dirty, 1) > 0;
+
+                const bool settingsOpen = m_ui->isSettingsOpen();
+                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen();
+                const bool overlayOpen = settingsOpen || quitAppOpen;
+
+                // --- Detect overlay changes -------------------------------
+                bool settingsChanged = false;
+                ui::SettingsRenderState settingsState;
+                bool settingsStateValid = false;
+                if (settingsOpen) {
+                    settingsStateValid = m_ui->buildSettingsRenderState(settingsState);
+                    if (settingsStateValid) {
+                        if (settingsOpen != m_prevSettingsOpen) {
+                            settingsChanged = true;
+                        } else {
+                            ps4::Rect sdirty[8];
+                            settingsChanged =
+                                settingsDirtyRects(m_prevSettingsState,
+                                                   settingsState,
+                                                   m_prevSettingsOpen,
+                                                   settingsOpen,
+                                                   sdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevSettingsOpen) {
+                    settingsChanged = true;
+                }
+
+                bool quitChanged = false;
+                ui::ModalRenderState quitModalState;
+                bool quitModalStateValid = false;
+                if (quitAppOpen) {
+                    quitModalStateValid = m_ui->buildModalRenderState(quitModalState);
+                    if (quitModalStateValid) {
+                        if (quitAppOpen != m_prevQuitAppOpen) {
+                            quitChanged = true;
+                        } else {
+                            ps4::Rect mdirty[8];
+                            quitChanged =
+                                modalDirtyRects(m_prevQuitModalState,
+                                                quitModalState,
+                                                m_prevQuitAppOpen,
+                                                quitAppOpen,
+                                                mdirty, 8) > 0;
+                        }
+                    }
+                } else if (m_prevQuitAppOpen) {
+                    quitChanged = true;
+                }
+
+                const bool overlayChanged = settingsChanged || quitChanged;
+                const bool shouldRecompose =
+                    firstEntry ||
+                    (!overlayOpen && baseChanged) ||
+                    overlayChanged;
+
+                if (shouldRecompose) {
                     m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
                     m_appGridRenderer->renderFull(state, *m_uiCompositor);
-                    m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
+                    if (settingsOpen && settingsStateValid) {
+                        m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
+                    }
+                    if (quitAppOpen && quitModalStateValid) {
+                        m_modalRenderer->renderFull(quitModalState, *m_uiCompositor);
+                    }
+                    m_uiNeedsStage = true;
+
+                    // Record the state that was just rendered.
                     m_prevAppGridState = state;
                     m_prevAppGridValid = true;
-                    // The underlying surface was just re-seeded (full compose).
-                    // If the Settings overlay is open, it must be fully
-                    // re-composed on top of the newly-seeded surface. Reset
-                    // m_prevSettingsOpen so the overlay is treated as freshly
-                    // opened (full compose) rather than doing a region
-                    // recompose that would leave the overlay missing/incomplete.
-                    m_prevSettingsOpen = false;
-                    {
+                    if (settingsOpen && settingsStateValid) {
+                        m_prevSettingsOpen = true;
+                        m_prevSettingsState = settingsState;
+                    } else if (!settingsOpen) {
+                        m_prevSettingsOpen = false;
+                    }
+                    if (quitAppOpen && quitModalStateValid) {
+                        m_prevQuitAppOpen = true;
+                        m_prevQuitModalState = quitModalState;
+                    } else if (!quitAppOpen) {
+                        m_prevQuitAppOpen = false;
+                    }
+
+                    if (firstEntry || (!overlayOpen && baseChanged)) {
                         char buf[128];
                         snprintf(buf, sizeof(buf),
                                  "[app] composed App List Grid (full, %zu cards)",
                                  state.cards.size());
                         diagPrint(buf);
                     }
-                } else {
-                    // Compute dirty regions from the previous snapshot. This
-                    // detects selection/scroll movement, per-card content
-                    // changes (running, connecting, quitting, title, artwork),
-                    // and structural changes (app added/removed), matching the
-                    // Host Grid dirty-region behavior.
-                    ps4::Rect dirty[8];
-                    const int dirtyCount = appGridDirtyRects(
-                        m_prevAppGridState, state, dirty, 8);
-                    if (dirtyCount > 0) {
-                        for (int i = 0; i < dirtyCount; ++i) {
-                            m_appGridRenderer->renderRegion(state, *m_uiCompositor, dirty[i]);
-                            m_uiBlitter->addDirtyRect(dirty[i], kWidth, kHeight);
-                        }
-                        m_prevAppGridState = state;
-                        {
-                            char buf[128];
-                            snprintf(buf, sizeof(buf),
-                                     "[app] App List Grid redraw (%d rects, index %d, %zu cards)",
-                                     dirtyCount, state.selectedIndex, state.cards.size());
-                            diagPrint(buf);
-                        }
-                    } else {
-                        // No change: no recompose. prevAppGridState stays current.
-                        m_prevAppGridState = state;
-                    }
-                }
-
-                // --- Compose the Settings overlay on top of the App Grid ----
-                const bool settingsOpen = m_ui->isSettingsOpen();
-                if (settingsOpen || m_prevSettingsOpen) {
-                    if (!settingsOpen && m_prevSettingsOpen) {
-                        const ps4::Rect dim = m_settingsRenderer->dimBounds();
-                        m_appGridRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevSettingsOpen = false;
-                    } else if (settingsOpen) {
-                        ui::SettingsRenderState settingsState;
-                        if (m_ui->buildSettingsRenderState(settingsState)) {
-                            if (!m_prevSettingsOpen) {
-                                m_settingsRenderer->renderFull(settingsState, *m_uiCompositor);
-                                m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                            } else {
-                                // Compute dirty regions from the previous
-                                // snapshot. On a selection change this dirties
-                                // BOTH the old and new selected row bounds so
-                                // the previous highlight is cleared and the
-                                // new one is drawn.
-                                ps4::Rect sdirty[8];
-                                const int sdirtyCount = settingsDirtyRects(
-                                    m_prevSettingsState, settingsState,
-                                    m_prevSettingsOpen, settingsOpen, sdirty, 8);
-                                if (sdirtyCount > 0) {
-                                    for (int i = 0; i < sdirtyCount; ++i) {
-                                        m_settingsRenderer->renderRegion(settingsState, *m_uiCompositor, sdirty[i]);
-                                        m_uiBlitter->addDirtyRect(sdirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevSettingsOpen = true;
-                            m_prevSettingsState = settingsState;
-                        }
-                    }
-                }
-
-                // --- Compose the Quit App confirmation dialog --------------
-                // If the quit-app confirmation dialog is open, compose it on
-                // top of the App List Grid. Detect open/close and dirty the
-                // appropriate regions.
-                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen();
-                if (quitAppOpen || m_prevQuitAppOpen) {
-                    if (!quitAppOpen && m_prevQuitAppOpen) {
-                        // Close transition: restore the underlying App Grid.
-                        const ps4::Rect dim = m_modalRenderer->dimBounds();
-                        m_appGridRenderer->renderRegion(state, *m_uiCompositor, dim);
-                        m_uiBlitter->addDirtyRect(dim, kWidth, kHeight);
-                        m_prevQuitAppOpen = false;
-                    } else if (quitAppOpen) {
-                        ui::ModalRenderState modalState;
-                        if (m_ui->buildModalRenderState(modalState)) {
-                            ps4::Rect mdirty[8];
-                            const int mdirtyCount = modalDirtyRects(
-                                m_prevQuitModalState, modalState,
-                                m_prevQuitAppOpen, quitAppOpen,
-                                mdirty, 8);
-                            if (mdirtyCount > 0) {
-                                if (!m_prevQuitAppOpen) {
-                                    // Full open: compose the whole modal.
-                                    m_modalRenderer->renderFull(modalState, *m_uiCompositor);
-                                    m_uiBlitter->addFullSurfaceDirty(kWidth, kHeight);
-                                } else {
-                                    // Choice change while open.
-                                    for (int i = 0; i < mdirtyCount; ++i) {
-                                        m_modalRenderer->renderRegion(modalState, *m_uiCompositor, mdirty[i]);
-                                        m_uiBlitter->addDirtyRect(mdirty[i], kWidth, kHeight);
-                                    }
-                                }
-                            }
-                            m_prevQuitAppOpen = true;
-                            m_prevQuitModalState = modalState;
-                        }
-                    }
                 }
             }
-            // The artwork-dirty set has been consumed by the dirty-region
-            // computation above; clear it for the next frame.
+            // The artwork-dirty set has been consumed by the change detection
+            // above; clear it for the next frame.
             m_artworkDirtyApps.clear();
         }
     }
@@ -2737,17 +2654,43 @@ void MoonlightApp::present() {
     }
 
     // During streaming, the framebuffer holds the decoded video (with any
-    // in-stream overlay already alpha-blended over it by composeStreamOverlay).
-    // The CPU compositor's pending dirty regions must NOT be uploaded, because
-    // they would overwrite the video with stale CPU UI content. The compositor
-    // is only used for the CPU UI path (non-stream).
+    // in-stream overlay already alpha-blended over it by the GPU video pass).
+    // The CPU UI compositor is NOT drawn during streaming — the video path
+    // owns the framebuffer. The compositor is only used for the CPU UI path
+    // (non-stream).
     if (!m_streamActive) {
-        // Upload the current slot's pending dirty regions (if any) from the
-        // CPU compositor surface into the current framebuffer slot.
-        ps4::DirtyUploadStats stats = m_uiBlitter->uploadPendingDirty(
-            m_uiCompositor->pixels(), m_uiCompositor->width(),
-            m_uiCompositor->height(), m_uiCompositor->pitch());
-        (void)stats;
+        // If the CPU UI compositor surface changed, re-stage it into the GPU
+        // UI renderer's WC_GARLIC texture.
+        if (m_uiNeedsStage) {
+            ps4::GpuUiResult sr = m_gpuUiRenderer->stageUi(
+                m_uiCompositor->pixels(), m_uiCompositor->width(),
+                m_uiCompositor->height(), m_uiCompositor->pitch());
+            if (!sr.succeeded()) {
+                char buf[160];
+                snprintf(buf, sizeof(buf),
+                         "[app] GpuUiRenderer stageUi failed: category=%d",
+                         static_cast<int>(sr.category));
+                diagPrint(buf);
+            }
+            m_uiNeedsStage = false;
+        }
+
+        // Draw the staged UI texture fullscreen into the current framebuffer
+        // slot. The GPU writes the framebuffer (required for TILE framebuffers
+        // used at 4K).
+        void* fb = m_gfx->currentFramebuffer();
+        if (fb) {
+            ps4::GpuUiResult dr = m_gpuUiRenderer->drawUi(
+                fb, m_gfx->getFramebufferWidth(),
+                m_gfx->getFramebufferHeight());
+            if (!dr.succeeded()) {
+                char buf[160];
+                snprintf(buf, sizeof(buf),
+                         "[app] GpuUiRenderer drawUi failed: category=%d",
+                         static_cast<int>(dr.category));
+                diagPrint(buf);
+            }
+        }
     }
 
     ps4::GfxResult endResult = m_gfx->endFrame();
@@ -3110,6 +3053,7 @@ void MoonlightApp::prepareStreamOverlay() {
             statsState.resolution != m_prevOverlayStats.resolution ||
             statsState.fps != m_prevOverlayStats.fps ||
             statsState.bitrate != m_prevOverlayStats.bitrate ||
+            statsState.codec != m_prevOverlayStats.codec ||
             statsState.decodeTime != m_prevOverlayStats.decodeTime ||
             statsState.networkLatency != m_prevOverlayStats.networkLatency ||
             statsState.jitter != m_prevOverlayStats.jitter ||
@@ -3255,6 +3199,21 @@ void MoonlightApp::resetStreamOverlayCache() {
     m_prevOverlayMouse = ui::MouseEmulationRenderState();
     m_overlayActive = false;
     m_overlayStaged = false;
+
+    // Clear the persistent overlay compositor surface to fully transparent.
+    // The overlay compositor holds the last-rendered overlay pixels; resetting
+    // only the change-tracking state above is NOT sufficient, because the next
+    // prepareStreamOverlay() clears only the CURRENT active overlay region(s).
+    // Any overlay exercised in a previous session (mouse emulation, statistics)
+    // would otherwise leave stale pixels in the compositor that are re-blended
+    // over the video during the next session's exit hint (and on stream exit),
+    // showing a stale overlay. UiCompositor::clear(0,0,0,0) is a no-op (alpha 0
+    // blends and does not write), so memset the surface directly.
+    if (m_overlayCompositor) {
+        memset(m_overlayCompositor->pixelsWritable(), 0,
+               static_cast<size_t>(m_overlayCompositor->width()) *
+                   m_overlayCompositor->height() * 4u);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3335,6 +3294,18 @@ void MoonlightApp::updateStreamStatistics() {
     snap.valid = true;
     snap.width = decodeStats.width;
     snap.height = decodeStats.height;
+
+    // Active video codec, from the negotiated video format reported by the
+    // stream session (VIDEO_FORMAT_H264 = 0x0001, VIDEO_FORMAT_H265 = 0x0100).
+    // Empty until the format has been negotiated (renders "N/A").
+    if (m_streamSessionManager) {
+        const int vf = m_streamSessionManager->negotiatedVideoFormat();
+        if (vf == 0x0100) {
+            snap.codec = "HEVC (H.265)";
+        } else if (vf == 0x0001) {
+            snap.codec = "AVC (H.264)";
+        }
+    }
 
     if (dtUs > 0) {
         const double dtSec = static_cast<double>(dtUs) / kUsecPerSec;
@@ -3808,6 +3779,9 @@ void MoonlightApp::handleResetMoonlight() {
                 m_settingsManager->settings().presentationStyle);
             m_ui->setShowQuitAppDialog(
                 m_settingsManager->settings().showQuitAppDialog);
+            // Keep the HEVC availability gate consistent (isPro() is
+            // unchanged by a reset, but the default codec is Auto).
+            m_ui->setHevcAvailable(m_isPro);
         }
     }
 
@@ -4826,11 +4800,66 @@ void MoonlightApp::handleActivateApplication(ml::HostId hostId,
     // Game Optimization: ON → optimizeGameSettings=true (sops=1).
     if (m_settingsManager) {
         const ml::Settings& s = m_settingsManager->settings();
-        target.width = (s.resolution == ml::StreamResolution::R720p) ? 1280 : 1920;
-        target.height = (s.resolution == ml::StreamResolution::R720p) ? 720 : 1080;
+        // Map the resolution setting to the requested stream dimensions.
+        //   R720p -> 1280x720, R1080p -> 1920x1080, R4K -> 3840x2160.
+        // The 4K setting is only offered when the output is actually 4K, so a
+        // 4K stream is never requested on a 1080p output.
+        // Safe fallback: the persisted 4K setting is only honored when 4K
+        // output is actually active (is4KEnabled()). If the output is not 4K
+        // (e.g. the display changed to 1080p, or the settings file was carried
+        // over from a 4K setup), a stale 4K setting must NOT request a 4K
+        // stream — that would waste host encode bandwidth and client decode
+        // cost only to be shader-downscaled to the 1080p framebuffer. Clamp to
+        // 1080p in that case.
+        ml::StreamResolution effRes = s.resolution;
+        if (effRes == ml::StreamResolution::R4K && !m_is4KEnabled) {
+            effRes = ml::StreamResolution::R1080p;
+        }
+        target.width = (effRes == ml::StreamResolution::R720p) ? 1280 :
+                       (effRes == ml::StreamResolution::R4K) ? 3840 : 1920;
+        target.height = (effRes == ml::StreamResolution::R720p) ? 720 :
+                        (effRes == ml::StreamResolution::R4K) ? 2160 : 1080;
         target.fps = (s.frameRate == ml::StreamFrameRate::Fps30) ? 30 : 60;
+        // Bitrate in kbps from the Mbps setting (5/10/20/40/80 Mbps, the
+        // standard Moonlight client presets). The decoder level is selected
+        // independently as the max of the resolution floor and the bitrate
+        // requirement (see VideoDecoder.cpp), so the configured level always
+        // covers the stream.
+        target.bitrate = (s.bitrate == ml::StreamBitrate::B5) ? 5000 :
+                         (s.bitrate == ml::StreamBitrate::B10) ? 10000 :
+                         (s.bitrate == ml::StreamBitrate::B40) ? 40000 :
+                         (s.bitrate == ml::StreamBitrate::B80) ? 80000 : 20000;
         target.muteHostSpeakers = s.muteHostSpeakers;
         target.optimizeGameSettings = s.optimizeGameSettings;
+
+        // --- Determine the video codec to request --------------------------
+        // The decoder configuration is gated on isPro(): H.265/HEVC decode is
+        // only available on a PS4 Pro. This is the authoritative safe fallback
+        // — even if the persisted Codec setting is HEVC (e.g. left over from a
+        // previous neomode session), a non-Pro console (or non-Pro build)
+        // always requests H.264.
+        //
+        //   !isPro()                    -> H.264 (always)
+        //   codec == H264               -> H.264
+        //   codec == H265               -> H.265
+        //   codec == Auto (default)     -> H.265 if the host reports HEVC
+        //                                 support (serverCodecModeSupport &
+        //                                 SCM_HEVC) else H.264
+        //
+        // VIDEO_FORMAT_H264 = 0x0001, VIDEO_FORMAT_H265 = 0x0100.
+        // SCM_HEVC = 0x00000100.
+        const bool hostSupportsHevc =
+            (host->serverCodecModeSupport & 0x00000100) != 0;
+        if (!m_isPro) {
+            target.videoFormat = 0x0001;   // H.264
+        } else if (s.codec == ml::StreamCodec::H264) {
+            target.videoFormat = 0x0001;   // H.264
+        } else if (s.codec == ml::StreamCodec::H265) {
+            target.videoFormat = 0x0100;   // H.265
+        } else {
+            // Auto.
+            target.videoFormat = hostSupportsHevc ? 0x0100 : 0x0001;
+        }
     }
 
     // --- Request the launch ------------------------------------------------
@@ -5356,10 +5385,13 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         m_timingFramePresented = false;
         // Initialize the GPU NV12→BGRA fullscreen video pass. Loads the
         // shader binaries and allocates the OpenGNM command buffer / EOP
-        // label. Initialized once per stream session and released on stream
-        // teardown.
+        // label. The render target is created at the OUTPUT (framebuffer)
+        // resolution so the decoded stream frame (at its native resolution) is
+        // scaled to fill the output via the shader UVs. Initialized once per
+        // stream session and released on stream teardown.
         if (m_gpuVideoRenderer) {
-            ps4::GpuVideoResult gvr = m_gpuVideoRenderer->initialize();
+            ps4::GpuVideoResult gvr = m_gpuVideoRenderer->initialize(
+                m_gfx->getFramebufferWidth(), m_gfx->getFramebufferHeight());
             if (!gvr.succeeded()) {
                 char buf[160];
                 snprintf(buf, sizeof(buf),
@@ -5600,8 +5632,21 @@ void MoonlightApp::openSettingsOverlay() {
     // SettingsManager values.
     const ml::Settings& s = m_settingsManager->settings();
     ui::SettingsViewState view;
-    view.resolutionIndex = (s.resolution == ml::StreamResolution::R720p) ? 0 : 1;
+    view.resolutionIndex =
+        (s.resolution == ml::StreamResolution::R720p) ? 0 :
+        (s.resolution == ml::StreamResolution::R4K) ? 2 : 1;
+    // Safe fallback: if 4K output is not actually active (is4KEnabled()
+    // false), never present 4K as the current/selectable resolution even if a
+    // 4K setting was persisted from a previous 4K session. Clamp to 1080p so
+    // the Settings overlay never shows an unavailable 4K value.
+    if (!m_is4KEnabled && view.resolutionIndex == 2) {
+        view.resolutionIndex = 1;
+    }
     view.frameRateIndex = (s.frameRate == ml::StreamFrameRate::Fps30) ? 0 : 1;
+    view.bitrateIndex = (s.bitrate == ml::StreamBitrate::B5) ? 0 :
+                        (s.bitrate == ml::StreamBitrate::B10) ? 1 :
+                        (s.bitrate == ml::StreamBitrate::B40) ? 3 :
+                        (s.bitrate == ml::StreamBitrate::B80) ? 4 : 2;
     view.quitAppOnStreamExit = s.quitAppOnStreamExit;
     view.presentationStyleIndex =
         (s.presentationStyle == ml::PresentationStyle::Grid) ? 1 : 0;
@@ -5609,6 +5654,15 @@ void MoonlightApp::openSettingsOverlay() {
     view.muteHostSpeakers = s.muteHostSpeakers;
     view.optimizeGameSettings = s.optimizeGameSettings;
     view.showQuitAppDialog = s.showQuitAppDialog;
+    view.codecIndex = (s.codec == ml::StreamCodec::H264) ? 1 :
+                      (s.codec == ml::StreamCodec::H265) ? 2 : 0;
+    // Safe fallback: if the console is not a PS4 Pro (isPro() false), never
+    // present HEVC as a selectable/visible codec even if a HEVC setting was
+    // persisted from a previous Pro session. Clamp to Auto so the Settings
+    // overlay never shows an unavailable HEVC value.
+    if (!m_isPro && view.codecIndex == 2) {
+        view.codecIndex = 0;
+    }
     m_ui->setSettingsView(view);
 
     m_settingsOverlayOpen = true;
@@ -5626,10 +5680,17 @@ void MoonlightApp::closeSettingsOverlay(const ui::SettingsViewState& edited) {
     ml::Settings s = m_settingsManager->settings();
     s.resolution = (edited.resolutionIndex == 0)
                        ? ml::StreamResolution::R720p
-                       : ml::StreamResolution::R1080p;
+                       : (edited.resolutionIndex == 2)
+                             ? ml::StreamResolution::R4K
+                             : ml::StreamResolution::R1080p;
     s.frameRate = (edited.frameRateIndex == 0)
                       ? ml::StreamFrameRate::Fps30
                       : ml::StreamFrameRate::Fps60;
+    s.bitrate = (edited.bitrateIndex == 0) ? ml::StreamBitrate::B5 :
+                (edited.bitrateIndex == 1) ? ml::StreamBitrate::B10 :
+                (edited.bitrateIndex == 3) ? ml::StreamBitrate::B40 :
+                (edited.bitrateIndex == 4) ? ml::StreamBitrate::B80 :
+                                             ml::StreamBitrate::B20;
     s.quitAppOnStreamExit = edited.quitAppOnStreamExit;
     s.presentationStyle = (edited.presentationStyleIndex == 0)
                               ? ml::PresentationStyle::PlayStation
@@ -5638,6 +5699,9 @@ void MoonlightApp::closeSettingsOverlay(const ui::SettingsViewState& edited) {
     s.muteHostSpeakers = edited.muteHostSpeakers;
     s.optimizeGameSettings = edited.optimizeGameSettings;
     s.showQuitAppDialog = edited.showQuitAppDialog;
+    s.codec = (edited.codecIndex == 1) ? ml::StreamCodec::H264 :
+              (edited.codecIndex == 2) ? ml::StreamCodec::H265 :
+                                         ml::StreamCodec::Auto;
     m_settingsManager->setSettings(s);
 
     // Push the authoritative presentation style to the UI manager so the

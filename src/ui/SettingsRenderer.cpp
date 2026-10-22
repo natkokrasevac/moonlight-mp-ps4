@@ -95,24 +95,24 @@ ps4::Rect SettingsRenderer::panelBounds() const {
 }
 
 float SettingsRenderer::rowTop(int rowIndex) const {
-    // Rows 0-3 are under the STREAM header (after the title block).
-    // Rows 4-5 (Presentation Style, Show Quit App Dialog) are under the CLIENT
+    // Rows 0-5 are under the STREAM header (after the title block).
+    // Rows 6-7 (Presentation Style, Show Quit App Dialog) are under the CLIENT
     // header.
-    // Rows 6-7 (Speakers, Game Optimization) are under the HOST header.
+    // Rows 8-9 (Speakers, Game Optimization) are under the HOST header.
     const float baseY = margin() + titleBlockHeight() + sectionHeaderHeight();
-    if (rowIndex <= 3) {
+    if (rowIndex <= 5) {
         return baseY + rowIndex * rowHeight();
     }
-    // Rows 4-5: after rows 0-3, a separator, and the CLIENT header.
+    // Rows 6-7: after rows 0-5, a separator, and the CLIENT header.
     const float clientRowTop =
-        baseY + 4 * rowHeight() + separatorHeight() + sectionHeaderHeight();
-    if (rowIndex <= 5) {
-        return clientRowTop + (rowIndex - 4) * rowHeight();
+        baseY + 6 * rowHeight() + separatorHeight() + sectionHeaderHeight();
+    if (rowIndex <= 7) {
+        return clientRowTop + (rowIndex - 6) * rowHeight();
     }
-    // Rows 6-7: after row 5, a separator, and the HOST header.
+    // Rows 8-9: after row 7, a separator, and the HOST header.
     const float hostRowTop =
         clientRowTop + 2 * rowHeight() + separatorHeight() + sectionHeaderHeight();
-    return hostRowTop + (rowIndex - 6) * rowHeight();
+    return hostRowTop + (rowIndex - 8) * rowHeight();
 }
 
 ps4::Rect SettingsRenderer::rowBounds(int rowIndex) const {
@@ -122,11 +122,6 @@ ps4::Rect SettingsRenderer::rowBounds(int rowIndex) const {
                      static_cast<int>(y) - pad,
                      static_cast<int>(panelW()) + pad * 2,
                      static_cast<int>(rowHeight()) + pad * 2};
-}
-
-bool SettingsRenderer::rectsIntersect(const ps4::Rect& a, const ps4::Rect& b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x &&
-           a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,18 +134,15 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
         return;
     }
 
-    // 1. Full-screen dim layer (translucent black). This darkens the
-    //    underlying Host/App List. The base screen is already present in the
-    //    surface; the dim is composited over it.
-    comp.fillRect(0, 0, 1920, 1080, 0, 0, 0, UiTheme::kDimAlpha);   // ~0.55 alpha
-
-    // 2. Right-side panel (opaque/semi-opaque).
+    // Right-side panel (opaque/semi-opaque). No full-screen dim layer is
+    // applied (removed for the GPU UI path; the settings panel draws directly
+    // over the base screen, consistent with PS UI presentation).
     const int px = static_cast<int>(panelX());
     const int pw = static_cast<int>(panelW());
     comp.fillRect(px, 0, pw, 1080,
                   UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 220);   // ~0.98 alpha dark
 
-    // 3. Panel content.
+    // Panel content.
     const float contentX = panelX() + margin();
 
     // Title "Settings" (Bold).
@@ -173,8 +165,8 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kStreamSection,
                   contentX, streamHeaderY + baselineY, 200, 200, 210);
 
-    // Rows 0-3 (under STREAM).
-    for (int i = 0; i < 4 && i < static_cast<int>(state.rows.size()); ++i) {
+    // Rows 0-5 (under STREAM).
+    for (int i = 0; i < 6 && i < static_cast<int>(state.rows.size()); ++i) {
         drawRow(state.rows[i], i, rowTop(i), comp);
     }
 
@@ -182,26 +174,26 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
     drawSeparators(comp);
 
     // "CLIENT" section header.
-    const float clientHeaderY = rowTop(4) - sectionHeaderHeight();
+    const float clientHeaderY = rowTop(6) - sectionHeaderHeight();
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
                                  baselineY, lineHeight);
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kClientSection,
                   contentX, clientHeaderY + baselineY, 200, 200, 210);
 
-    // Rows 4-5 (Presentation Style, Show Quit App Dialog) under CLIENT.
-    for (int i = 4; i < 6 && i < static_cast<int>(state.rows.size()); ++i) {
+    // Rows 6-7 (Presentation Style, Show Quit App Dialog) under CLIENT.
+    for (int i = 6; i < 8 && i < static_cast<int>(state.rows.size()); ++i) {
         drawRow(state.rows[i], i, rowTop(i), comp);
     }
 
     // "HOST" section header.
-    const float hostHeaderY = rowTop(6) - sectionHeaderHeight();
+    const float hostHeaderY = rowTop(8) - sectionHeaderHeight();
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
                                  baselineY, lineHeight);
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kHostSection,
                   contentX, hostHeaderY + baselineY, 200, 200, 210);
 
-    // Rows 6-7 (Speakers, Game Optimization) under HOST.
-    for (int i = 6; i < 8 && i < static_cast<int>(state.rows.size()); ++i) {
+    // Rows 8-9 (Speakers, Game Optimization) under HOST.
+    for (int i = 8; i < 10 && i < static_cast<int>(state.rows.size()); ++i) {
         drawRow(state.rows[i], i, rowTop(i), comp);
     }
 
@@ -226,43 +218,6 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
                          UiTheme::kDisabledTextR, UiTheme::kDisabledTextG, UiTheme::kDisabledTextB);
 }
 
-void SettingsRenderer::renderRegion(const SettingsRenderState& state,
-                                    ps4::UiCompositor& comp,
-                                    const ps4::Rect& dirty) {
-    if (!m_fonts) {
-        return;
-    }
-    if (!comp.pushClip(dirty)) {
-        return;   // Empty clip; nothing to recompose.
-    }
-
-    // Repaint the panel background intersecting the dirty region. Rows live
-    // inside the opaque panel, so the panel background is the base for row
-    // recomposition (no dim handling needed inside the opaque panel).
-    const ps4::Rect panel = panelBounds();
-    if (rectsIntersect(dirty, panel)) {
-        const int px = static_cast<int>(panelX());
-        const int pw = static_cast<int>(panelW());
-        comp.fillRect(px, 0, pw, 1080,
-                      UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 250);
-    }
-
-    // Redraw every row that intersects the dirty region.
-    for (int i = 0; i < static_cast<int>(state.rows.size()); ++i) {
-        if (rectsIntersect(dirty, rowBounds(i))) {
-            drawRow(state.rows[i], i, rowTop(i), comp);
-        }
-    }
-
-    // Redraw the section separator lines that intersect the dirty region.
-    // The panel background repaint above erases any separator that overlaps a
-    // row's bounds (the separators sit exactly at the bottom of the last row
-    // of each section), so they must be redrawn here or they disappear.
-    drawSeparators(comp);
-
-    comp.popClip();
-}
-
 // ---------------------------------------------------------------------------
 // Section separator lines
 // ---------------------------------------------------------------------------
@@ -276,14 +231,14 @@ void SettingsRenderer::drawSeparators(ps4::UiCompositor& comp) {
     // same gap between the separator and the heading as the STREAM heading has
     // from the separator above it. Visual order: rows -> spacing -> separator
     // -> gap -> heading.
-    const float clientSepY = rowTop(4) - sectionHeaderHeight() - 8.0f;
+    const float clientSepY = rowTop(6) - sectionHeaderHeight() - 8.0f;
     comp.fillRect(px, static_cast<int>(clientSepY), pw, 2,
                   UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
 
     // Separator between CLIENT and HOST sections. Placed above the HOST
     // heading, after the spacing gap that follows the CLIENT rows, with the
     // same gap to the heading as the STREAM heading has.
-    const float hostSepY = rowTop(6) - sectionHeaderHeight() - 8.0f;
+    const float hostSepY = rowTop(8) - sectionHeaderHeight() - 8.0f;
     comp.fillRect(px, static_cast<int>(hostSepY), pw, 2,
                   UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
 }
@@ -324,10 +279,20 @@ void SettingsRenderer::drawRow(const SettingsRowRenderData& row, int rowIndex,
         comp.drawText(ps4::FontRasterizer::FontFace::Regular, row.label.c_str(),
                       contentX, textBaseline,
                       UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
-        // Value, right-aligned within the panel.
-        drawRightAlignedText(comp, *m_fonts, ps4::FontRasterizer::FontFace::Regular,
-                             row.value.c_str(), valueRightX, textBaseline,
-                             UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+        // Value, right-aligned within the panel. A value that exceeds the
+        // recommended value for the current stream specs is drawn emphasized
+        // (orange, bold) to flag the over-recommendation.
+        if (row.valueWarning) {
+            drawRightAlignedText(comp, *m_fonts,
+                                 ps4::FontRasterizer::FontFace::RegularBold,
+                                 row.value.c_str(), valueRightX, textBaseline,
+                                 UiTheme::kValueWarningR, UiTheme::kValueWarningG,
+                                 UiTheme::kValueWarningB);
+        } else {
+            drawRightAlignedText(comp, *m_fonts, ps4::FontRasterizer::FontFace::Regular,
+                                 row.value.c_str(), valueRightX, textBaseline,
+                                 UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+        }
     } else {
         // Disabled row: dimmed label and value.
         comp.drawText(ps4::FontRasterizer::FontFace::Regular, row.label.c_str(),

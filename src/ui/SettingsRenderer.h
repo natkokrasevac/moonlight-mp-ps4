@@ -101,14 +101,6 @@ public:
     /// state into `comp`. Used when the Settings overlay opens.
     void renderFull(const SettingsRenderState& state, ps4::UiCompositor& comp);
 
-    /// Recompose only the region `dirty` of the Settings overlay for the given
-    /// state. Pushes a clip equal to `dirty`, repaints the panel background,
-    /// and redraws every row that intersects the region. Produces the same
-    /// pixels as a full compose of the same state. Used for row selection /
-    /// value changes while the overlay is open.
-    void renderRegion(const SettingsRenderState& state, ps4::UiCompositor& comp,
-                      const ps4::Rect& dirty);
-
 private:
     // --- Layout geometry ----------------------------------------------------
     float panelX() const { return 1306.0f; }
@@ -119,9 +111,9 @@ private:
     float sectionHeaderHeight() const { return 40.0f; }
     float separatorHeight() const { return 40.0f; }
 
-    /// The Y position of the top of the row at `rowIndex`. Rows 0-3 are under
-    /// the STREAM header; rows 4-5 (Presentation Style, Show Quit App Dialog)
-    /// are under the CLIENT header; rows 6-7 (Speakers, Game Optimization) are
+    /// The Y position of the top of the row at `rowIndex`. Rows 0-5 are under
+    /// the STREAM header; rows 6-7 (Presentation Style, Show Quit App Dialog)
+    /// are under the CLIENT header; rows 8-9 (Speakers, Game Optimization) are
     /// under the HOST header.
     float rowTop(int rowIndex) const;
 
@@ -130,12 +122,8 @@ private:
                  float rowY, ps4::UiCompositor& comp);
 
     /// Draw the section separator lines (between STREAM/CLIENT/HOST/INPUT)
-    /// into `comp`. Used by both renderFull() and renderRegion() so the
-    /// separators are not erased when a row is recomposed.
+    /// into `comp`.
     void drawSeparators(ps4::UiCompositor& comp);
-
-    /// True if two rectangles intersect.
-    static bool rectsIntersect(const ps4::Rect& a, const ps4::Rect& b);
 
     // --- State --------------------------------------------------------------
     ps4::FontRasterizer* m_fonts = nullptr;

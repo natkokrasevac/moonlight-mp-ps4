@@ -20,7 +20,10 @@
 // facilities available through the OpenOrbis SDK:
 //   - VideoOut initialization and buffer registration.
 //   - Direct-memory allocation and mapping for GPU-visible framebuffers.
-//   - CPU-side framebuffer writes (no GNM command buffers).
+//   - TILING_MODE_TILE (tiled) framebuffers, sized via the GNM render-target
+//     byte-size computation.
+//   - GPU-side framebuffer clear (DMA constant fill) — required because the
+//     CPU cannot write pixels into a tiled surface.
 //   - VideoOut flip submission and event-queue synchronization.
 //   - Deterministic initialization and shutdown.
 //
@@ -33,8 +36,18 @@
 #include <orbis/libkernel.h>
 #include <orbis/VideoOut.h>
 #include <orbis/UserService.h>
-#include <orbis/GnmDriver.h>
 #include <orbis/_types/errors.h>
+
+// --- OpenGNM headers (private to this translation unit) ---------------------
+// gnmdriver.h provides sceGnmSubmitCommandBuffers / sceGnmSubmitDone /
+// sceGnmFlushGarlic (the OpenGNM driver API). Do NOT also include
+// <orbis/GnmDriver.h> — its declarations of the same sceGnm* functions use
+// different types and conflict with the OpenGNM ones.
+#include <gnm_commandbuffer.h>
+#include <gnm_drawcommandbuffer.h>
+#include <gnm_rendertarget.h>
+#include <gnmdriver.h>
+#include <platform.h>   // sceGnmGpuMode()
 
 #include <cstdio>               // printf, fflush, snprintf
 #include <cstring>              // memset
@@ -43,9 +56,13 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Native PS4 display resolution.
-static constexpr uint32_t kDisplayWidth  = 1920;
-static constexpr uint32_t kDisplayHeight = 1080;
+/// Base (non-4K) PS4 display resolution.
+static constexpr uint32_t kBaseDisplayWidth  = 1920;
+static constexpr uint32_t kBaseDisplayHeight = 1080;
+
+/// PS4 Pro 4K display resolution (used when the output is actually >1080p).
+static constexpr uint32_t k4KDisplayWidth  = 3840;
+static constexpr uint32_t k4KDisplayHeight = 2160;
 
 /// Number of buffered frame resources (double buffering).
 static constexpr uint32_t kFrameCount = 2;
@@ -65,6 +82,34 @@ static constexpr int32_t kDirectMemoryType = ORBIS_KERNEL_WC_GARLIC;
 /// Memory protection for framebuffer mapping (CPU RW + GPU RW).
 static constexpr int32_t kDirectMemoryProt = ORBIS_KERNEL_PROT_CPU_RW |
                                              ORBIS_KERNEL_PROT_GPU_ALL;
+
+/// Direct-memory type for the GPU-clear command buffer (WC Garlic).
+static constexpr int32_t kCmdMemType = ORBIS_KERNEL_WC_GARLIC;
+/// Memory protection for the command buffer (CPU RW + GPU RW).
+static constexpr int32_t kCmdMemProt = ORBIS_KERNEL_PROT_CPU_RW |
+                                       ORBIS_KERNEL_PROT_GPU_ALL;
+
+/// Direct-memory type for the EOP sync label (WB Onion, CPU-pollable).
+static constexpr int32_t kLabelMemType = ORBIS_KERNEL_WB_ONION;
+/// Memory protection for the EOP label (CPU RW + GPU RW).
+static constexpr int32_t kLabelMemProt = ORBIS_KERNEL_PROT_CPU_RW |
+                                         ORBIS_KERNEL_PROT_GPU_ALL;
+
+/// Command buffer size in bytes for the GPU clear. Passed to sceGnmCmdInit.
+static constexpr uint32_t kCommandBytes = 16384;
+
+/// EOP spin timeout (iterations) before declaring a hang.
+static constexpr uint32_t kEopTimeoutSpins = 100000000u;
+
+/// Framebuffer render-target tile mode hint. The framebuffer is registered
+/// with VideoOut as TILING_MODE_TILE, so the GNM render target (and the GPU
+/// UI/video renderers that draw into it) must use a matching display tile
+/// mode. Per the SCE VideoOut documentation, SCE_VIDEO_OUT_TILING_MODE_TILE
+/// corresponds to kTileModeDisplay_2dThin in the Gnm library, so the render
+/// target must use GNM_TM_DISPLAY_2D_THIN. Using a different display tile mode
+/// (e.g. 1D_THIN) would write pixels in a swizzle pattern that does not match
+/// the VideoOut scanout, producing garbled/blocky output.
+static constexpr GnmTileMode kFramebufferTileMode = GNM_TM_DISPLAY_2D_THIN;
 
 /// Fixed diagnostic clear color (clearly non-symmetric to expose channel
 /// order errors). BGRA8: B=0x40, G=0x80, R=0xC0, A=0xFF.
@@ -93,6 +138,50 @@ struct FrameResource {
     bool    submitted;     ///< Whether this frame has been submitted for flip.
 };
 
+/// A minimal direct-memory block used for the GPU-clear command buffer and the
+/// EOP sync label. Mirrors the DmemBlock pattern used by the GPU renderers.
+struct DmemBlock {
+    void*  baseAddress = nullptr;
+    off_t  physicalAddress = 0;
+    size_t totalSize = 0;
+
+    bool allocate(size_t size, int32_t memType, int32_t prot) {
+        if (baseAddress != nullptr) {
+            return false;
+        }
+        const size_t alignedSize = (size + kDirectMemoryAlignment - 1) &
+                                   ~(kDirectMemoryAlignment - 1);
+        int32_t rc = sceKernelAllocateDirectMemory(
+            0, sceKernelGetDirectMemorySize(), alignedSize,
+            kDirectMemoryAlignment, memType, &physicalAddress);
+        if (rc != 0) {
+            return false;
+        }
+        rc = sceKernelMapDirectMemory(
+            &baseAddress, alignedSize, prot, 0, physicalAddress,
+            kDirectMemoryAlignment);
+        if (rc != 0 || baseAddress == nullptr) {
+            sceKernelReleaseDirectMemory(physicalAddress, alignedSize);
+            baseAddress = nullptr;
+            physicalAddress = 0;
+            return false;
+        }
+        memset(baseAddress, 0, alignedSize);
+        totalSize = alignedSize;
+        return true;
+    }
+
+    void release() {
+        if (baseAddress) {
+            sceKernelMunmap(baseAddress, totalSize);
+            sceKernelReleaseDirectMemory(physicalAddress, totalSize);
+            baseAddress = nullptr;
+            physicalAddress = 0;
+            totalSize = 0;
+        }
+    }
+};
+
 /// Private implementation of GfxManager. Holds all OpenOrbis SDK resources.
 struct GfxManager::Impl {
     // --- VideoOut -----------------------------------------------------------
@@ -102,6 +191,16 @@ struct GfxManager::Impl {
     off_t   directMemOffset = 0;   ///< Physical offset of the direct-memory block.
     size_t  directMemSize = 0;     ///< Total size of the direct-memory block.
     void*   directMemBase = nullptr; ///< Mapped virtual address of the block.
+
+    // --- Framebuffer geometry (tiled) ---------------------------------------
+    size_t   frameBufferSize = 0;  ///< Per-frame tiled buffer size (bytes).
+    uint32_t fbPitch = 0;          ///< Tiled pitch in pixels (for VideoOut).
+    GnmRenderTarget rt;            ///< Framebuffer render-target descriptor.
+
+    // --- GPU clear resources ------------------------------------------------
+    DmemBlock cmdMem;              ///< GPU-clear command buffer (Garlic).
+    DmemBlock labelMem;            ///< EOP sync label (Onion).
+    volatile uint64_t* eopLabel = nullptr;  ///< EOP sync label (CPU-pollable).
 
     // --- Frame resources ----------------------------------------------------
     FrameResource frames[kFrameCount];
@@ -122,6 +221,10 @@ GfxManager::GfxManager()
     : m_state(LifecycleState::Constructed)
     , m_frameIndex(0)
     , m_frameActive(false)
+    , m_fbWidth(1920)
+    , m_fbHeight(1080)
+    , m_isNeoMode(false)
+    , m_is4KOutput(false)
     , m_impl(new Impl())
 {
 }
@@ -166,6 +269,47 @@ GfxResult GfxManager::initialize() {
                          static_cast<uint32_t>(impl->videoOutHandle));
     }
 
+    // 1b. Detect PS4 Pro / 4K capability.
+    //     sceKernelIsNeoMode() is a static hardware query (PS4 Pro / NEO).
+    //     sceVideoOutGetResolutionStatus() reports the current VideoOut
+    //     resolution; height > 1080 means the display is actually running a
+    //     high-resolution (>1080p) output mode.
+    //
+    //     These two capabilities are INDEPENDENT:
+    //       - isPro()       = isNeoMode()  (drives H.265/HEVC decode, codec)
+    //       - is4KEnabled() = is4KOutput() (drives framebuffer, UI, video)
+    //
+    //     A Pro on a 1080p screen is isPro()=true but is4KEnabled()=false.
+    m_isNeoMode = (sceKernelIsNeoMode() != 0);
+
+    OrbisVideoOutResolutionStatus resStatus;
+    memset(&resStatus, 0, sizeof(resStatus));
+    int32_t resRc = sceVideoOutGetResolutionStatus(impl->videoOutHandle,
+                                                   &resStatus);
+    m_is4KOutput = (resRc == ORBIS_OK && resStatus.height > kBaseDisplayHeight);
+
+    // Determine the framebuffer dimensions.
+    // When the output is actually >1080p (is4KOutput()), allocate 4K
+    // framebuffers. Otherwise stay at 1080p.
+    if (m_is4KOutput) {
+        m_fbWidth  = k4KDisplayWidth;
+        m_fbHeight = k4KDisplayHeight;
+    } else {
+        m_fbWidth  = kBaseDisplayWidth;
+        m_fbHeight = kBaseDisplayHeight;
+    }
+
+    {
+        char buf[192];
+        snprintf(buf, sizeof(buf),
+                 "[gfx] capability: neoMode=%d 4kOutput=%d pro=%d 4kEnabled=%d fb=%ux%u",
+                 m_isNeoMode ? 1 : 0, m_is4KOutput ? 1 : 0,
+                 m_isNeoMode ? 1 : 0,
+                 m_is4KOutput ? 1 : 0,
+                 m_fbWidth, m_fbHeight);
+        gfxDiagPrint(buf);
+    }
+
     // 2. Set the flip rate to 60 Hz.
     int32_t rc = sceVideoOutSetFlipRate(impl->videoOutHandle, ORBIS_VIDEO_OUT_FLIP_60HZ);
     if (rc != ORBIS_OK) {
@@ -196,10 +340,67 @@ GfxResult GfxManager::initialize() {
                          static_cast<uint32_t>(rc));
     }
 
-    // 5. Allocate and map direct memory for the framebuffers.
-    const size_t frameBufferSize = static_cast<size_t>(kDisplayWidth) *
-                                   static_cast<size_t>(kDisplayHeight) * 4u;
-    const size_t totalSize = frameBufferSize * kFrameCount;
+    // 5. Create the framebuffer render-target descriptor and compute the
+    //    tiled buffer size.
+    //    The framebuffer is a TILING_MODE_TILE surface, so its memory footprint
+    //    is larger than width*height*4 (the tiled layout pads to tile
+    //    boundaries). The authoritative size comes from the GNM render-target
+    //    byte-size computation (sceGnmRtCalcByteSize), which accounts for the
+    //    tile mode. The descriptor is created once with the display dimensions
+    //    and the display tile-mode hint; its base address is set per frame.
+    //    UNORM (not sRGB) so the GPU writes the raw computed bytes; the display
+    //    applies the sRGB interpretation via the VideoOut A8B8G8R8_SRGB buffer
+    //    attribute.
+    //
+    //    The render target's min GPU mode must match the actual console GPU
+    //    mode (sceGnmGpuMode()). Per the SCE VideoOut documentation, a
+    //    TILING_MODE_TILE display buffer cannot use kGpuModeBase on a NEO
+    //    (PS4 Pro) console — the tile layout differs between BASE and NEO, so
+    //    using BASE on a Pro at 4K would misalign the buffer (garbled/blocky
+    //    output). sceGnmGpuMode() returns NEO on a Pro and BASE on a base PS4,
+    //    so it correctly selects the tile layout for both.
+    memset(&impl->rt, 0, sizeof(impl->rt));
+    {
+        GnmRenderTargetCreateInfo rtCi;
+        memset(&rtCi, 0, sizeof(rtCi));
+        rtCi.width = m_fbWidth;
+        rtCi.height = m_fbHeight;
+        rtCi.pitch = 0;
+        rtCi.numslices = 1;
+        rtCi.colorfmt = GNM_FMT_R8G8B8A8_UNORM;
+        rtCi.colortilemodehint = kFramebufferTileMode;
+        rtCi.mingpumode = sceGnmGpuMode();
+        rtCi.numsamples = 1;
+        rtCi.numfragments = 1;
+        GnmError gerr = sceGnmCreateRenderTarget(&impl->rt, &rtCi);
+        if (gerr != GNM_ERROR_OK) {
+            gfxDiagPrint("[gfx] initialization failed: render target create");
+            m_state = LifecycleState::Stopping;
+            shutdown();
+            return GfxResult(GfxResultCategory::GraphicsInitFailure,
+                             static_cast<uint32_t>(gerr));
+        }
+    }
+
+    // Compute the per-frame tiled buffer size and the tiled pitch (in pixels)
+    // used for the VideoOut buffer attribute.
+    {
+        uint64_t rtSize = 0;
+        uint32_t rtAlign = 0;
+        GnmError gerr = sceGnmRtCalcByteSize(&rtSize, &rtAlign, &impl->rt);
+        if (gerr != GNM_ERROR_OK || rtSize == 0) {
+            gfxDiagPrint("[gfx] initialization failed: render target size calc");
+            m_state = LifecycleState::Stopping;
+            shutdown();
+            return GfxResult(GfxResultCategory::GraphicsInitFailure,
+                             static_cast<uint32_t>(gerr));
+        }
+        impl->frameBufferSize = static_cast<size_t>(rtSize);
+        impl->fbPitch = sceGnmRtGetPitch(&impl->rt);
+    }
+
+    // 6. Allocate and map direct memory for the framebuffers.
+    const size_t totalSize = impl->frameBufferSize * kFrameCount;
     const size_t alignedSize = (totalSize + kDirectMemoryAlignment - 1) &
                                ~(kDirectMemoryAlignment - 1);
 
@@ -226,25 +427,27 @@ GfxResult GfxManager::initialize() {
                          static_cast<uint32_t>(rc));
     }
 
-    // 6. Set up the frame resources.
+    // 7. Set up the frame resources.
     for (uint32_t i = 0; i < kFrameCount; ++i) {
         FrameResource& frame = impl->frames[i];
         frame.colorBuffer = static_cast<uint8_t*>(impl->directMemBase) +
-                            static_cast<size_t>(i) * frameBufferSize;
+                            static_cast<size_t>(i) * impl->frameBufferSize;
         frame.flipArg = 0;
         frame.submitted = false;
         impl->displayBufferAddresses[i] = frame.colorBuffer;
     }
 
-    // 7. Register the display buffers with VideoOut.
+    // 8. Register the display buffers with VideoOut as TILING_MODE_TILE.
+    //    The pixel pitch passed to VideoOut is the render target's tiled pitch
+    //    (not the linear width), matching how the tiled buffer is laid out.
     OrbisVideoOutBufferAttribute attribute;
     sceVideoOutSetBufferAttribute(
         &attribute,
         ORBIS_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB,
-        ORBIS_VIDEO_OUT_TILING_MODE_LINEAR,
+        ORBIS_VIDEO_OUT_TILING_MODE_TILE,
         ORBIS_VIDEO_OUT_ASPECT_RATIO_16_9,
-        kDisplayWidth, kDisplayHeight,
-        kDisplayWidth);  // pitch in pixels (linear, no padding)
+        m_fbWidth, m_fbHeight,
+        impl->fbPitch);  // tiled pitch in pixels
 
     rc = sceVideoOutRegisterBuffers(
         impl->videoOutHandle, 0, impl->displayBufferAddresses, kFrameCount,
@@ -257,7 +460,25 @@ GfxResult GfxManager::initialize() {
                          static_cast<uint32_t>(rc));
     }
 
-    // 8. Establish initial frame state.
+    // 9. Allocate the GPU-clear command buffer (Garlic) and EOP label (Onion).
+    //    The framebuffer is tiled, so clear() must issue a GPU DMA fill rather
+    //    than a CPU memset. This command buffer and EOP label are the minimal
+    //    GNM resources needed for that fill.
+    if (!impl->cmdMem.allocate(kCommandBytes, kCmdMemType, kCmdMemProt)) {
+        gfxDiagPrint("[gfx] initialization failed: clear cmd alloc");
+        m_state = LifecycleState::Stopping;
+        shutdown();
+        return GfxResult(GfxResultCategory::MemoryAllocationFailure);
+    }
+    if (!impl->labelMem.allocate(0x1000, kLabelMemType, kLabelMemProt)) {
+        gfxDiagPrint("[gfx] initialization failed: clear label alloc");
+        m_state = LifecycleState::Stopping;
+        shutdown();
+        return GfxResult(GfxResultCategory::MemoryAllocationFailure);
+    }
+    impl->eopLabel = (volatile uint64_t*)impl->labelMem.baseAddress;
+
+    // 10. Establish initial frame state.
     m_frameIndex = 0;
     m_frameActive = false;
     impl->flipCount = 0;
@@ -338,15 +559,54 @@ GfxResult GfxManager::clear(uint32_t color) {
     Impl* impl = m_impl;
     FrameResource& frame = impl->frames[m_frameIndex];
 
-    // CPU-fill the entire active framebuffer with the given color.
-    // The framebuffer is A8B8G8R8_SRGB; in memory the byte order is RGBA
-    // (byte 0 = R, byte 1 = G, byte 2 = B, byte 3 = A), so the 32-bit value
-    // is stored as 0xAABBGGRR in little-endian memory.
-    uint32_t* dst = static_cast<uint32_t*>(frame.colorBuffer);
-    const size_t pixelCount = static_cast<size_t>(kDisplayWidth) *
-                              static_cast<size_t>(kDisplayHeight);
-    for (size_t i = 0; i < pixelCount; ++i) {
-        dst[i] = color;
+    if (!impl->cmdMem.baseAddress || !impl->eopLabel) {
+        return GfxResult(GfxResultCategory::MemoryAllocationFailure);
+    }
+
+    // GPU DMA constant fill of the whole tiled framebuffer.
+    //
+    // The framebuffer is a TILING_MODE_TILE A8B8G8R8_SRGB surface, so a CPU
+    // memset would not produce a correct visual clear (the tiled layout
+    // rearranges pixels spatially). A DMA constant fill writes the same 32-bit
+    // value to every 32-bit word in the buffer; because every pixel is a 32-bit
+    // word regardless of the tile layout, this sets every pixel to the clear
+    // color. The color is 0xAABBGGRR in memory (byte 0 = R), matching the
+    // A8B8G8R8_SRGB framebuffer.
+    //
+    // The GPU address of the WC_GARLIC framebuffer is its CPU virtual address
+    // (the same address the GPU renderers use as the render-target base).
+    GnmCommandBuffer cmd = sceGnmCmdInit(impl->cmdMem.baseAddress,
+                                         kCommandBytes, NULL, NULL);
+
+    // Fill the entire per-frame tiled buffer with the clear color.
+    sceGnmDrawCmdFillMemory(&cmd,
+                            (uint64_t)(uintptr_t)frame.colorBuffer,
+                            static_cast<uint32_t>(impl->frameBufferSize),
+                            color);
+
+    // EOP synchronization so the fill is complete before the caller proceeds.
+    *impl->eopLabel = 0;
+    sceGnmDrawCmdEventWriteEop(&cmd, GNM_FLUSH_AND_INV_CB_DATA_TS,
+                               (uint64_t)(uintptr_t)impl->eopLabel,
+                               GNM_DATA_SEL_SEND_DATA64, 1);
+
+    const uint32_t dcbSize =
+        (uint32_t)((uintptr_t)cmd.cmdptr - (uintptr_t)cmd.beginptr);
+    void* dcbAddrs[1] = {cmd.beginptr};
+    uint32_t dcbSizes[1] = {dcbSize};
+
+    int res = sceGnmSubmitCommandBuffers(1, dcbAddrs, dcbSizes, NULL, NULL);
+    if (res < 0) {
+        return GfxResult(GfxResultCategory::SubmissionFailure,
+                         static_cast<uint32_t>(res));
+    }
+    sceGnmSubmitDone();
+
+    uint32_t spins = 0;
+    while (*impl->eopLabel != 1) {
+        if (++spins > kEopTimeoutSpins) {
+            return GfxResult(GfxResultCategory::SynchronizationFailure);
+        }
     }
 
     return GfxResult();
@@ -357,9 +617,9 @@ GfxResult GfxManager::endFrame() {
         return GfxResult(GfxResultCategory::InvalidLifecycleState);
     }
 
-    // CPU-side frame preparation is complete. The framebuffer contents are
-    // ready to be presented. No additional work is required here for the
-    // CPU-write path; present() performs the flip.
+    // Frame preparation is complete. The framebuffer contents are ready to be
+    // presented. No additional work is required here; present() performs the
+    // flip.
 
     return GfxResult();
 }
@@ -372,11 +632,11 @@ GfxResult GfxManager::present() {
     Impl* impl = m_impl;
     FrameResource& frame = impl->frames[m_frameIndex];
 
-    // Make CPU writes visible to the display hardware.
+    // Make GPU writes visible to the display hardware.
     // For WC_GARLIC memory, this flushes the write-combining buffers.
     sceGnmFlushGarlic();
 
-    // Signal that all CPU-side command-buffer submissions are complete.
+    // Signal that all command-buffer submissions are complete.
     // This is the OpenOrbis equivalent of sce::Gnm::submitDone() in the SCE
     // reference. It is REQUIRED to prevent CPU_FAULT_SUBMITDONE_TIMEOUT_IN_
     // SUSPEND_ASYNC when the app is suspended/killed while the Videodec2
@@ -471,7 +731,12 @@ void GfxManager::shutdown() {
         impl->videoOutHandle = -1;
     }
 
-    // 6. Unmap and release the direct memory.
+    // 6. Release the GPU-clear command buffer and EOP label resources.
+    impl->eopLabel = nullptr;
+    impl->cmdMem.release();
+    impl->labelMem.release();
+
+    // 7. Unmap and release the direct memory.
     if (impl->directMemBase != nullptr) {
         sceKernelMunmap(impl->directMemBase, impl->directMemSize);
         impl->directMemBase = nullptr;
@@ -482,13 +747,15 @@ void GfxManager::shutdown() {
         impl->directMemSize = 0;
     }
 
-    // 7. Reset frame state.
+    // 8. Reset frame state.
     for (uint32_t i = 0; i < kFrameCount; ++i) {
         impl->frames[i].colorBuffer = nullptr;
         impl->frames[i].flipArg = 0;
         impl->frames[i].submitted = false;
         impl->displayBufferAddresses[i] = nullptr;
     }
+    impl->frameBufferSize = 0;
+    impl->fbPitch = 0;
     m_frameIndex = 0;
 
     m_state = LifecycleState::ShutDown;
@@ -505,11 +772,11 @@ bool GfxManager::isInitialized() const {
 }
 
 uint32_t GfxManager::getFramebufferWidth() const {
-    return kDisplayWidth;
+    return m_fbWidth;
 }
 
 uint32_t GfxManager::getFramebufferHeight() const {
-    return kDisplayHeight;
+    return m_fbHeight;
 }
 
 uint32_t GfxManager::currentFrameIndex() const {
@@ -525,8 +792,31 @@ void* GfxManager::currentFramebuffer() {
 }
 
 size_t GfxManager::framebufferStrideBytes() const {
-    // Linear A8B8G8R8_SRGB, tightly packed (no padding).
-    return static_cast<size_t>(kDisplayWidth) * 4u;
+    // Legacy linear-layout accessor. The framebuffer is now TILING_MODE_TILE,
+    // so the CPU does not write pixels row-by-row and this value is not used
+    // by the GPU renderers (they derive the tiled pitch from the render-target
+    // descriptor). Retained for the linear-layout contract: width * 4.
+    return static_cast<size_t>(m_fbWidth) * 4u;
+}
+
+// ---------------------------------------------------------------------------
+// PS4 Pro / 4K capability queries
+// ---------------------------------------------------------------------------
+
+bool GfxManager::isNeoMode() const {
+    return m_isNeoMode;
+}
+
+bool GfxManager::is4KOutput() const {
+    return m_is4KOutput;
+}
+
+bool GfxManager::isPro() const {
+    return m_isNeoMode;
+}
+
+bool GfxManager::is4KEnabled() const {
+    return m_is4KOutput;
 }
 
 } // namespace ps4

@@ -79,7 +79,7 @@ class InputManager;
 class NetworkManager;
 class FontRasterizer;
 class UiCompositor;
-class UiBlitter;
+class GpuUiRenderer;
 class SysmoduleManager;
 class UiSoundManager;
 class ImeDialog;
@@ -264,8 +264,17 @@ private:
     /// cached region is re-blended over the fresh video each frame.
     std::unique_ptr<ps4::UiCompositor> m_overlayCompositor;
 
-    /// Dedicated GPU UI blitter. Owned by MoonlightApp.
-    std::unique_ptr<ps4::UiBlitter> m_uiBlitter;
+    /// GPU fullscreen UI compositor. Owned by MoonlightApp.
+    /// Stages the CPU UI compositor surface (1080p) into a WC_GARLIC texture
+    /// and draws it fullscreen into the framebuffer via a GPU pass. Replaces
+    /// the CPU UiBlitter it replaces. Initialized after GfxManager.
+    std::unique_ptr<ps4::GpuUiRenderer> m_gpuUiRenderer;
+
+    /// Whether the CPU UI compositor surface changed and must be re-staged
+    /// into the GPU UI renderer's WC_GARLIC texture before the next drawUi().
+    /// Set whenever any screen renderer recomposes into m_uiCompositor.
+    /// Initialized true so the first frame always stages the UI.
+    bool m_uiNeedsStage = true;
 
     /// GPU NV12→BGRA fullscreen video pass. Owned by MoonlightApp.
     /// Converts decoded Videodec2 NV12 frames into the WC_GARLIC VideoOut
@@ -541,6 +550,17 @@ private:
     /// The launch generation associated with the current Connecting state.
     /// Used to reject stale completion events from a previous launch/host.
     uint32_t m_connectingGeneration = 0;
+
+    // --- PS4 Pro / 4K capability state --------------------------------------
+    /// Whether PS4 Pro processing is available AND active. Cached from
+    /// GfxManager::isPro() after GfxManager is initialized. When false
+    /// (non-Pro hardware), H.265/HEVC decode and codec settings are bypassed.
+    bool m_isPro = false;
+    /// Whether 4K output processing is available AND active. Cached from
+    /// GfxManager::is4KEnabled() after GfxManager is initialized. When false
+    /// (non-4K display), 4K framebuffer / UI scaling / video pipeline are
+    /// bypassed.
+    bool m_is4KEnabled = false;
 
     // --- Stream presentation state -----------------------------------------
     /// The current stream's HostId (0 = none).

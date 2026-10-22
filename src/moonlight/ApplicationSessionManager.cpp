@@ -414,6 +414,11 @@ void* ApplicationSessionManager::launchWorker(void* arg) {
     config.width = target.width;
     config.height = target.height;
     config.fps = target.fps;
+    config.bitrate = target.bitrate;
+    // Apply the selected video codec. The mask advertises the selected codec
+    // plus H.264 as a baseline so the host can always fall back to H.264.
+    config.videoFormat = target.videoFormat;
+    config.videoFormatMask = target.videoFormat | 0x0001;
 
     // --- Generate remote input AES key/IV -----------------------------------
     // Matches the moonlight-embedded gs_start_app() reference:

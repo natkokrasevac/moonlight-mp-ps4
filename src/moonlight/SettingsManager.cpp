@@ -154,6 +154,8 @@ bool SettingsManager::initialize() {
                 m_impl->settings.resolution = StreamResolution::R720p;
             } else if (v == 1080) {
                 m_impl->settings.resolution = StreamResolution::R1080p;
+            } else if (v == 2160) {
+                m_impl->settings.resolution = StreamResolution::R4K;
             }
             // Invalid value → keep default (1080p).
             continue;
@@ -168,6 +170,46 @@ bool SettingsManager::initialize() {
                 m_impl->settings.frameRate = StreamFrameRate::Fps60;
             }
             // Invalid value → keep default (60 FPS).
+            continue;
+        }
+
+        // --- bitrate --------------------------------------------------------
+        // Optional key. Missing key → default (20 Mbps). Known values: 5, 10,
+        // 20, 40, 80 (the standard Moonlight client presets). Unknown/corrupt
+        // value → default (20 Mbps). Never fails settings loading. A value
+        // from the previous preset set (14/50/135/240) is treated as unknown
+        // and falls back to the default; the file is rewritten on next save.
+        if (strncmp(key, "bitrate", keyLen) == 0 && keyLen == 7) {
+            long v = strtol(value, nullptr, 10);
+            if (v == 5) {
+                m_impl->settings.bitrate = StreamBitrate::B5;
+            } else if (v == 10) {
+                m_impl->settings.bitrate = StreamBitrate::B10;
+            } else if (v == 20) {
+                m_impl->settings.bitrate = StreamBitrate::B20;
+            } else if (v == 40) {
+                m_impl->settings.bitrate = StreamBitrate::B40;
+            } else if (v == 80) {
+                m_impl->settings.bitrate = StreamBitrate::B80;
+            }
+            // Invalid value → keep default (20 Mbps).
+            continue;
+        }
+
+        // --- codec ----------------------------------------------------------
+        // Optional key. Missing key → default (Auto). Known values: 0 = Auto,
+        // 1 = H264/AVC, 2 = H265/HEVC. Unknown/corrupt value → default (Auto).
+        // Never fails settings loading.
+        if (strncmp(key, "codec", keyLen) == 0 && keyLen == 5) {
+            long v = strtol(value, nullptr, 10);
+            if (v == 1) {
+                m_impl->settings.codec = StreamCodec::H264;
+            } else if (v == 2) {
+                m_impl->settings.codec = StreamCodec::H265;
+            } else {
+                m_impl->settings.codec = StreamCodec::Auto;
+            }
+            // Invalid value → keep default (Auto).
             continue;
         }
 
@@ -269,9 +311,16 @@ bool SettingsManager::initialize() {
     {
         char buf[256];
         snprintf(buf, sizeof(buf),
-                 "[settings] loaded: %s %s quitOnExit=%d presentation=%s streamStats=%d muteHost=%d optimize=%d showQuitDialog=%d",
-                 m_impl->settings.resolution == StreamResolution::R1080p ? "1080p" : "720p",
+                 "[settings] loaded: %s %s bitrate=%d codec=%s quitOnExit=%d presentation=%s streamStats=%d muteHost=%d optimize=%d showQuitDialog=%d",
+                 m_impl->settings.resolution == StreamResolution::R4K ? "4K" :
+                 (m_impl->settings.resolution == StreamResolution::R1080p ? "1080p" : "720p"),
                  m_impl->settings.frameRate == StreamFrameRate::Fps60 ? "60fps" : "30fps",
+                 m_impl->settings.bitrate == StreamBitrate::B5 ? 5 :
+                 (m_impl->settings.bitrate == StreamBitrate::B10 ? 10 :
+                 (m_impl->settings.bitrate == StreamBitrate::B40 ? 40 :
+                 (m_impl->settings.bitrate == StreamBitrate::B80 ? 80 : 20))),
+                 m_impl->settings.codec == StreamCodec::H264 ? "h264" :
+                 (m_impl->settings.codec == StreamCodec::H265 ? "h265" : "auto"),
                  m_impl->settings.quitAppOnStreamExit ? 1 : 0,
                  m_impl->settings.presentationStyle == PresentationStyle::Grid ? "grid" : "playstation",
                  m_impl->settings.streamStatisticsEnabled ? 1 : 0,
@@ -323,8 +372,14 @@ bool SettingsManager::save() {
     }
 
     // Write explicit readable values (not raw enum ordinals).
-    const int resolution = (m_impl->settings.resolution == StreamResolution::R1080p) ? 1080 : 720;
+    const int resolution =
+        (m_impl->settings.resolution == StreamResolution::R4K) ? 2160 :
+        (m_impl->settings.resolution == StreamResolution::R1080p) ? 1080 : 720;
     const int framerate  = (m_impl->settings.frameRate == StreamFrameRate::Fps60) ? 60 : 30;
+    const int bitrate    = (m_impl->settings.bitrate == StreamBitrate::B5) ? 5 :
+                           (m_impl->settings.bitrate == StreamBitrate::B10) ? 10 :
+                           (m_impl->settings.bitrate == StreamBitrate::B40) ? 40 :
+                           (m_impl->settings.bitrate == StreamBitrate::B80) ? 80 : 20;
     const int quitOnExit = m_impl->settings.quitAppOnStreamExit ? 1 : 0;
     const char* presentation =
         (m_impl->settings.presentationStyle == PresentationStyle::Grid)
@@ -333,9 +388,13 @@ bool SettingsManager::save() {
     const int muteHost = m_impl->settings.muteHostSpeakers ? 1 : 0;
     const int optimize = m_impl->settings.optimizeGameSettings ? 1 : 0;
     const int showQuitDialog = m_impl->settings.showQuitAppDialog ? 1 : 0;
+    const int codec = (m_impl->settings.codec == StreamCodec::H264) ? 1 :
+                      (m_impl->settings.codec == StreamCodec::H265) ? 2 : 0;
 
     fprintf(f, "resolution=%d\n", resolution);
     fprintf(f, "framerate=%d\n", framerate);
+    fprintf(f, "bitrate=%d\n", bitrate);
+    fprintf(f, "codec=%d\n", codec);
     fprintf(f, "quit_app_on_stream_exit=%d\n", quitOnExit);
     fprintf(f, "presentation_style=%s\n", presentation);
     fprintf(f, "stream_statistics=%d\n", streamStats);

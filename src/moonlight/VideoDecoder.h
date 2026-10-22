@@ -50,7 +50,8 @@ namespace ml {
 
 /// Project-owned video codec identifier.
 enum class VideoCodec : uint8_t {
-    H264 = 1   ///< H.264 / AVC (only supported codec for now).
+    H264 = 1,   ///< H.264 / AVC.
+    H265 = 2    ///< H.265 / HEVC (PS4 Pro).
 };
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,12 @@ struct VideoDecoderConfiguration {
     uint32_t width = 0;        ///< Video width (pixels).
     uint32_t height = 0;       ///< Video height (pixels).
     uint32_t fps = 0;          ///< Video frame rate.
+    /// Requested stream bitrate (kbps). Used to select a decoder level high
+    /// enough to cover the stream: the configured level must accommodate both
+    /// the resolution AND the bitrate, otherwise the decoder core rejects the
+    /// stream with SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE. 0 = unknown (falls back
+    /// to the resolution-derived level).
+    uint32_t bitrateKbps = 0;
     VideoCodec codec = VideoCodec::H264;
     uint32_t colorSpace = 1;   ///< COLORSPACE_REC_709 (1).
     uint32_t colorRange = 0;   ///< COLOR_RANGE_LIMITED (0).
@@ -160,7 +167,7 @@ struct VideoDecoderUpdate {
 struct EncodedVideoUnit {
     uint64_t frameNumber = 0;   ///< Moonlight frame number.
     uint32_t frameType = 0;     ///< FRAME_TYPE_IDR (1) or FRAME_TYPE_PFRAME (0).
-    uint32_t codecType = 0;     ///< VIDEO_FORMAT_H264 (0x0001).
+    uint32_t codecType = 0;     ///< H.264 (0x0001) or H.265/HEVC (0xEE049).
     uint32_t rtpTimestamp = 0;  ///< Original RTP timestamp (90 kHz).
     uint64_t presentationTimeUs = 0;  ///< Presentation time (µs).
     uint32_t fullLength = 0;    ///< Total AU byte count.

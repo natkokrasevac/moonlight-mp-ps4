@@ -101,8 +101,13 @@ struct StreamConfiguration {
     int width = 1920;              ///< Video width (pixels).
     int height = 1080;             ///< Video height (pixels).
     int fps = 60;                  ///< Video frame rate.
-    int bitrate = 20000;           ///< Video bitrate (kbps).
+    int bitrate = 50000;           ///< Video bitrate (kbps).
     int packetSize = 1024;         ///< Max video packet size (bytes).
+    /// Selected video codec: VIDEO_FORMAT_H264 (0x0001) or VIDEO_FORMAT_H265
+    /// (0x0100). Set by MoonlightApp from the Codec setting + isPro().
+    int videoFormat = 0x0001;
+    /// Mask of supported video formats advertised to the host. Includes the
+    /// selected codec bit (and H.264 as a baseline).
     int videoFormatMask = 0x0001;  ///< VIDEO_FORMAT_H264 (H.264 only).
     int audioConfiguration = 0x000302CA;  ///< AUDIO_CONFIGURATION_STEREO.
     int streamingMode = 0;         ///< STREAM_CFG_LOCAL (LAN streaming).
@@ -137,6 +142,10 @@ struct ApplicationLaunchTarget {
     int width = 1920;                         ///< Requested stream width.
     int height = 1080;                        ///< Requested stream height.
     int fps = 60;                             ///< Requested stream frame rate.
+    int bitrate = 25000;                      ///< Requested stream bitrate (kbps).
+    /// Selected video codec: VIDEO_FORMAT_H264 (0x0001) or VIDEO_FORMAT_H265
+    /// (0x0100). Set by MoonlightApp from the Codec setting + isPro().
+    int videoFormat = 0x0001;
     /// When true, the host's speakers are muted (no audio played on the host).
     /// Maps to the GameStream `localAudioPlayMode` parameter.
     bool muteHostSpeakers = true;

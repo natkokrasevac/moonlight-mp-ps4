@@ -246,11 +246,6 @@ ps4::Rect AppListRenderer::cardAreaBounds() const {
                      static_cast<int>(v.w), static_cast<int>(v.h)};
 }
 
-bool AppListRenderer::rectsIntersect(const ps4::Rect& a, const ps4::Rect& b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x &&
-           a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -268,39 +263,6 @@ void AppListRenderer::renderFull(const AppListRenderState& state,
     }
 
     drawLegend(state, comp);
-}
-
-void AppListRenderer::renderRegion(const AppListRenderState& state,
-                                   ps4::UiCompositor& comp,
-                                   const ps4::Rect& dirty) {
-    if (!comp.pushClip(dirty)) {
-        return;   // Empty clip; nothing to recompose.
-    }
-
-    // Repaint the background intersecting the dirty region (clipped to it).
-    drawBackground(comp, m_bgImg);
-
-    // Top bar if it intersects.
-    if (rectsIntersect(dirty, topBarBounds())) {
-        drawTopBar(state, comp);
-    }
-
-    // Separator lines if they intersect.
-    drawSeparators(comp);
-
-    // Every card that intersects the dirty region.
-    for (int i = 0; i < static_cast<int>(state.cards.size()); ++i) {
-        if (rectsIntersect(dirty, cardVisualBounds(i, state.selectedIndex))) {
-            drawCard(state.cards[i], i, state.selectedIndex, comp);
-        }
-    }
-
-    // Bottom legend if it intersects.
-    if (rectsIntersect(dirty, bottomLegendBounds())) {
-        drawLegend(state, comp);
-    }
-
-    comp.popClip();
 }
 
 // ---------------------------------------------------------------------------

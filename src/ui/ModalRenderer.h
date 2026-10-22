@@ -99,14 +99,6 @@ public:
     /// `comp`. Used when the modal opens.
     void renderFull(const ModalRenderState& state, ps4::UiCompositor& comp);
 
-    /// Recompose only the region `dirty` of the modal for the given state.
-    /// Pushes a clip equal to `dirty`, repaints the panel background, and
-    /// redraws the choice buttons that intersect the region. Produces the same
-    /// pixels as a full compose of the same state. Used for choice changes
-    /// while the modal is open.
-    void renderRegion(const ModalRenderState& state, ps4::UiCompositor& comp,
-                      const ps4::Rect& dirty);
-
 private:
     /// Draw the Delete Host modal content into `comp` (panel already drawn).
     void drawDeleteHostContent(const ModalRenderState& state,
@@ -131,9 +123,6 @@ private:
     /// Draw the Reset Moonlight No/Yes choice buttons into `comp`.
     void drawResetMoonlightChoices(const ModalRenderState& state,
                                    ps4::UiCompositor& comp);
-
-    /// True if two rectangles intersect.
-    static bool rectsIntersect(const ps4::Rect& a, const ps4::Rect& b);
 
     // --- State --------------------------------------------------------------
     ps4::FontRasterizer* m_fonts = nullptr;

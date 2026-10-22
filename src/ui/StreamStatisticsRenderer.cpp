@@ -33,7 +33,6 @@
 #include "UiRenderPrimitives.h"
 
 #include <cstdio>    // printf, fflush
-#include <cstring>   // memset (dirty-region transparent clear)
 
 namespace ui {
 
@@ -91,7 +90,7 @@ ps4::Rect StreamStatisticsRenderer::bounds() const {
     // The statistics panel is at the top-left with a safe screen inset. The
     // panel background is drawn with a 10px outward margin around the content
     // area.
-    const int rowCount = 8;
+    const int rowCount = 9;
     const int contentH = static_cast<int>(padding() * 2.0f + rowCount * rowHeight());
     const int x = static_cast<int>(panelX()) - 10;
     const int y = static_cast<int>(panelY()) - 10;
@@ -112,12 +111,6 @@ ps4::Rect StreamStatisticsRenderer::rowBounds(int rowIndex) const {
                      static_cast<int>(y) - pad,
                      static_cast<int>(panelW()) + pad * 2,
                      static_cast<int>(rowHeight()) + pad * 2};
-}
-
-bool StreamStatisticsRenderer::rectsIntersect(const ps4::Rect& a,
-                                              const ps4::Rect& b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x &&
-           a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,69 +136,17 @@ void StreamStatisticsRenderer::render(const StreamStatisticsRenderState& state,
     comp.fillRect(panel.x, panel.y, panel.w, panel.h, 0, 0, 0, UiTheme::kDimAlpha);
 
     // --- Statistics rows. ---------------------------------------------------
-    // Row order: Resolution, FPS, Bitrate, Network, Jitter, Frame Decoding,
-    // Frame Presentation, Time per Frame.
+    // Row order: Resolution, FPS, Bitrate, Codec, Network, Jitter, Frame
+    // Decoding, Frame Presentation, Time per Frame.
     drawRow(UiStrings::kStatResolution, state.resolution, 0, rowTop(0), comp);
     drawRow(UiStrings::kStatFps, state.fps, 1, rowTop(1), comp);
     drawRow(UiStrings::kStatBitrate, state.bitrate, 2, rowTop(2), comp);
-    drawRow(UiStrings::kStatNetwork, state.networkLatency, 3, rowTop(3), comp);
-    drawRow(UiStrings::kStatJitter, state.jitter, 4, rowTop(4), comp);
-    drawRow(UiStrings::kStatFrameDecode, state.frameDecodeTime, 5, rowTop(5), comp);
-    drawRow(UiStrings::kStatFramePresent, state.framePresentTime, 6, rowTop(6), comp);
-    drawRow(UiStrings::kStatFrameTotal, state.frameTotalTime, 7, rowTop(7), comp);
-}
-
-void StreamStatisticsRenderer::renderRegion(const StreamStatisticsRenderState& state,
-                                            ps4::UiCompositor& comp,
-                                            const ps4::Rect& dirty) {
-    if (!m_fonts) {
-        return;
-    }
-    if (!comp.pushClip(dirty)) {
-        return;   // Empty clip; nothing to recompose.
-    }
-
-    // --- Clear the dirty region to fully transparent. ----------------------
-    // The panel background is semi-transparent (alpha 140), so repainting it
-    // over the previous row's text would leave the old text faintly visible
-    // underneath (the old text would show through dimmed). To fully erase the
-    // previous row, the dirty region must be cleared to RGBA 0,0,0,0 first.
-    // The compositor's fillRect() treats alpha==0 as a no-op, so the region is
-    // cleared directly via the writable pixels.
-    {
-        uint8_t* px = comp.pixelsWritable();
-        const uint32_t pitch = comp.pitch();
-        for (int yy = 0; yy < dirty.h; ++yy) {
-            uint8_t* row = px + static_cast<size_t>(dirty.y + yy) * pitch +
-                           static_cast<size_t>(dirty.x) * 4;
-            memset(row, 0, static_cast<size_t>(dirty.w) * 4);
-        }
-    }
-
-    // Repaint the panel background intersecting the dirty region. Rows live
-    // inside the semi-transparent panel, so the panel background is the base
-    // for row recomposition.
-    const ps4::Rect panel = bounds();
-    if (rectsIntersect(dirty, panel)) {
-        comp.fillRect(panel.x, panel.y, panel.w, panel.h, 0, 0, 0, UiTheme::kDimAlpha);
-    }
-
-    // Redraw every row that intersects the dirty region.
-    const char* labels[8] = {UiStrings::kStatResolution, UiStrings::kStatFps,
-                             UiStrings::kStatBitrate, UiStrings::kStatNetwork,
-                             UiStrings::kStatJitter, UiStrings::kStatFrameDecode,
-                             UiStrings::kStatFramePresent, UiStrings::kStatFrameTotal};
-    const std::string* values[8] = {&state.resolution, &state.fps,
-                                    &state.bitrate, &state.networkLatency,
-                                    &state.jitter, &state.frameDecodeTime,
-                                    &state.framePresentTime, &state.frameTotalTime};
-    for (int i = 0; i < 8; ++i) {
-        if (rectsIntersect(dirty, rowBounds(i))) {
-            drawRow(labels[i], *values[i], i, rowTop(i), comp);
-        }
-    }
-
-    comp.popClip();
+    drawRow(UiStrings::kStatCodec, state.codec, 3, rowTop(3), comp);
+    drawRow(UiStrings::kStatNetwork, state.networkLatency, 4, rowTop(4), comp);
+    drawRow(UiStrings::kStatJitter, state.jitter, 5, rowTop(5), comp);
+    drawRow(UiStrings::kStatFrameDecode, state.frameDecodeTime, 6, rowTop(6), comp);
+    drawRow(UiStrings::kStatFramePresent, state.framePresentTime, 7, rowTop(7), comp);
+    drawRow(UiStrings::kStatFrameTotal, state.frameTotalTime, 8, rowTop(8), comp);
 }
 
 // ---------------------------------------------------------------------------

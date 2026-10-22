@@ -19,7 +19,8 @@
 // Implements the GPU NV12→BGRA conversion using OpenGNM, following the exact
 // state/setup patterns from the working OpenGNM triangle smoke test
 // (gpu_triangle_smoke.c):
-//   - LINEAR render target over the WC_GARLIC VideoOut framebuffer.
+//   - TILE render target over the WC_GARLIC VideoOut framebuffer (the
+//     framebuffer is registered with VideoOut as TILING_MODE_TILE).
 //   - Positive viewport Y scale (Y inversion done in the vertex shader).
 //   - VS+PS binding, fullscreen triangle draw, EOP synchronization.
 //
@@ -54,6 +55,7 @@
 #include <gnm_sampler.h>
 #include <gnm_buffer.h>
 #include <gnmdriver.h>
+#include <platform.h>   // sceGnmGpuMode()
 #include <compat/pssl.h>
 
 #include <cstdio>               // printf, fflush, snprintf
@@ -390,11 +392,15 @@ GpuVideoRenderer::~GpuVideoRenderer() {
 // Initialization
 // ---------------------------------------------------------------------------
 
-GpuVideoResult GpuVideoRenderer::initialize() {
+GpuVideoResult GpuVideoRenderer::initialize(uint32_t fbWidth, uint32_t fbHeight) {
     if (m_impl->initialized) {
         return GpuVideoResult();
     }
     Impl* impl = m_impl;
+
+    if (fbWidth == 0 || fbHeight == 0) {
+        return GpuVideoResult(GpuVideoResultCategory::InvalidFrame);
+    }
 
     // --- 1. Allocate the Garlic block (shader code + cmd buffer + cb) ------
     // Layout:
@@ -476,21 +482,34 @@ GpuVideoResult GpuVideoRenderer::initialize() {
 
     // --- 6. Create the render target descriptor over the framebuffer -------
     // The base address is set per frame in renderFrame() (the framebuffer is
-    // double-buffered). The descriptor is created once with the display
-    // dimensions and a LINEAR tile mode matching the VideoOut framebuffer.
-    // UNORM (not sRGB) so the GPU writes the raw computed bytes; the display
-    // applies the sRGB interpretation via the VideoOut A8B8G8R8_SRGB buffer
-    // attribute.
+    // double-buffered). The descriptor is created once with the OUTPUT
+    // (framebuffer) dimensions and a TILE tile mode matching the VideoOut
+    // framebuffer (TILING_MODE_TILE). Per the SCE VideoOut documentation,
+    // SCE_VIDEO_OUT_TILING_MODE_TILE corresponds to kTileModeDisplay_2dThin,
+    // so the render target uses GNM_TM_DISPLAY_2D_THIN. UNORM (not sRGB) so
+    // the GPU writes the raw computed bytes; the display applies the sRGB
+    // interpretation via the VideoOut A8B8G8R8_SRGB buffer attribute.
+    //
+    // The decoded NV12 frame is bound per-frame at its native (stream)
+    // resolution and scaled to fill this output render target via the shader
+    // UVs (nearest-neighbor), so the same renderer handles 1080p->1080p,
+    // 1080p->4K upscale, and 4K->4K.
+    //
+    // The min GPU mode must match the actual console GPU mode (sceGnmGpuMode):
+    // a TILING_MODE_TILE display buffer cannot use BASE on a NEO (PS4 Pro)
+    // console, and the tile layout differs between BASE and NEO. sceGnmGpuMode()
+    // returns NEO on a Pro and BASE on a base PS4, so it selects the correct
+    // tile layout for both 1080p (base) and 4K (NEO) output.
     memset(&impl->rt, 0, sizeof(impl->rt));
     GnmRenderTargetCreateInfo rtCi;
     memset(&rtCi, 0, sizeof(rtCi));
-    rtCi.width = kDisplayWidth;
-    rtCi.height = kDisplayHeight;
+    rtCi.width = fbWidth;
+    rtCi.height = fbHeight;
     rtCi.pitch = 0;
     rtCi.numslices = 1;
     rtCi.colorfmt = GNM_FMT_R8G8B8A8_UNORM;
-    rtCi.colortilemodehint = GNM_TM_DISPLAY_LINEAR_ALIGNED;
-    rtCi.mingpumode = GNM_GPU_BASE;
+    rtCi.colortilemodehint = GNM_TM_DISPLAY_2D_THIN;
+    rtCi.mingpumode = sceGnmGpuMode();
     rtCi.numsamples = 1;
     rtCi.numfragments = 1;
     GnmError gerr = sceGnmCreateRenderTarget(&impl->rt, &rtCi);
@@ -671,19 +690,53 @@ GpuVideoResult GpuVideoRenderer::renderFrameWithOverlay(
     sceGnmRtSetBaseAddr(&impl->rt, framebuffer);
 
     // --- Build the Y and UV linear textures over the decoded planes --------
-    // Y plane: R8, width x surfaceHeight, pitch = frame.pitch (bytes == pixels).
+    // IMPORTANT: for a GNM_ARRAY_LINEAR_GENERAL texture the GPU derives the
+    // level-0 row stride from the TEXTURE WIDTH, not from ci->pitch.
+    // sceGpaTpInit() sets tp.linearwidth = tex->width, and
+    // gpaComputeSurfaceAddrFromCoordLinear() uses linearwidth as the pitch;
+    // ci->pitch (basetiledpitch) is only consulted for mip levels > 0.
+    //
+    // The decoder's Y plane row stride is exactly the pitch it reports in
+    // framePitchInBytes. This is NOT always the 256-aligned width: the decoder
+    // chooses the surface pitch per stream/codec. Observed values:
+    //   HEVC 1080p -> 2048 (256-aligned, padded)
+    //   AVC  1080p -> 1920 (tightly packed, no padding)
+    //   4K         -> 3840
+    // The texture WIDTH must equal this reported pitch (in texels), because for
+    // a GNM_ARRAY_LINEAR_GENERAL texture the GPU derives the row stride from the
+    // texture width. Using any other value (e.g. rounding 1920 up to 2048) makes
+    // the GPU read rows at the wrong stride -> horizontal banding/shear.
+    //
+    // The pixel shader then samples only the leftmost visible fraction via
+    // uvScale.x = visibleWidth / pitch.
+    //
+    // Y plane: R8, pitch x surfaceHeight, width = pitch (row stride in texels).
+    //
+    // Defensive guard: the stride must be at least the visible width. If the
+    // decoder reports pitch < width (malformed), use the visible width so the
+    // image is not clipped (uvScaleX is forced to 1.0 in that case).
+    const uint32_t yTexWidth = (frame.pitch >= frame.width) ? frame.pitch
+                                                            : frame.width;
     GnmTextureCreateInfo yCi;
     memset(&yCi, 0, sizeof(yCi));
     yCi.texturetype = GNM_TEXTURE_2D;
-    yCi.width = frame.width;
+    yCi.width = yTexWidth;            // row stride in texels (>= visible width)
     yCi.height = frame.surfaceHeight;
-    yCi.pitch = frame.pitch;
+    yCi.pitch = yTexWidth;
     yCi.depth = 1;
     yCi.nummiplevels = 1;
     yCi.numslices = 1;
     yCi.format = GNM_FMT_R8_UNORM;
-    yCi.tilemodehint = GNM_TM_DISPLAY_LINEAR_ALIGNED;
-    yCi.mingpumode = GNM_GPU_BASE;
+    // The decoder writes a plain linear (row-major) frame buffer. Use the
+    // GENERAL linear display mode, not the ALIGNED variant: DISPLAY_LINEAR_
+    // ALIGNED imposes pitch/base-address alignment constraints that the
+    // decoder's buffer does not satisfy. DISPLAY_LINEAR_GENERAL has no such
+    // constraint and matches the decoder's plain linear layout.
+    yCi.tilemodehint = GNM_TM_DISPLAY_LINEAR_GENERAL;
+    // The min GPU mode must match the actual console GPU mode (sceGnmGpuMode):
+    // the tile/address layout differs between BASE and NEO (PS4 Pro). This must
+    // match the render target's mingpumode (also sceGnmGpuMode()).
+    yCi.mingpumode = sceGnmGpuMode();
     yCi.numfragments = 1;
     GnmError gerr = sceGnmCreateTexture(&impl->yTex, &yCi);
     if (gerr != GNM_ERROR_OK) {
@@ -693,22 +746,26 @@ GpuVideoResult GpuVideoRenderer::renderFrameWithOverlay(
     sceGnmTexSetBaseAddress(&impl->yTex, frame.yPlane);
     sceGnmTexSetMemoryType(&impl->yTex, GNM_MEMORY_READONLY, false);
 
-    // UV plane: RG8, (width/2) x (surfaceHeight/2), pitch = frame.pitch/2.
+    // UV plane: RG8, (pitch/2) x (surfaceHeight/2), width = pitch/2 (row
+    // stride in texels; RG8 = 2 bytes/texel, so pitch/2 texels = pitch bytes).
+    // See the Y texture above for why the width must equal the row stride.
     const GnmDataFormat rg8 = GNM_DATA_FORMAT_INIT(
         GNM_IMG_DATA_FORMAT_8_8, GNM_IMG_NUM_FORMAT_UNORM,
         GNM_CHAN_X, GNM_CHAN_Y, GNM_CHAN_CONSTANT0, GNM_CHAN_CONSTANT1);
     GnmTextureCreateInfo uvCi;
     memset(&uvCi, 0, sizeof(uvCi));
     uvCi.texturetype = GNM_TEXTURE_2D;
-    uvCi.width = frame.width / 2;
+    uvCi.width = yTexWidth / 2;       // row stride in texels (>= visible width/2)
     uvCi.height = frame.surfaceHeight / 2;
-    uvCi.pitch = frame.pitch / 2;
+    uvCi.pitch = yTexWidth / 2;
     uvCi.depth = 1;
     uvCi.nummiplevels = 1;
     uvCi.numslices = 1;
     uvCi.format = rg8;
-    uvCi.tilemodehint = GNM_TM_DISPLAY_LINEAR_ALIGNED;
-    uvCi.mingpumode = GNM_GPU_BASE;
+    // Plain linear display mode (see the Y texture above).
+    uvCi.tilemodehint = GNM_TM_DISPLAY_LINEAR_GENERAL;
+    // Match the console GPU mode (see the Y texture above).
+    uvCi.mingpumode = sceGnmGpuMode();
     uvCi.numfragments = 1;
     gerr = sceGnmCreateTexture(&impl->uvTex, &uvCi);
     if (gerr != GNM_ERROR_OK) {
@@ -721,9 +778,13 @@ GpuVideoResult GpuVideoRenderer::renderFrameWithOverlay(
     // --- Fill the constant buffer (BT.709, limited range) ------------------
     // Matches the NV12→BGRA math (see video_p.pssl).
     //   yuvOffset = (16/255, 128/255, 128/255, 0)
-    //   uvScale   = (1, 1, 0, 0)
+    //   uvScale   = (width/pitch, height/surfaceHeight, 0, 0)  visible fraction
+    //               of the pitch-wide / surface-tall Y/UV textures (the textures
+    //               are created at the decoder's reported pitch and surface
+    //               height, so the GPU reads rows at the decoder's true stride
+    //               and the shader samples only the visible region)
     //   uvOffset  = (0, 0, 0, 0)
-    //   chromaOffset = (0.5/(width/2), 0.5/(surfaceHeight/2), 0, 0)
+    //   chromaOffset = (0, 0, 0, 0)  (left-sited chroma needs no offset)
     //   coeffR = (149/128, 0, 229/128, 0)
     //   coeffG = (149/128, -27/128, -68/128, 0)
     //   coeffB = (149/128, 270/128, 0, 0)
@@ -734,14 +795,45 @@ GpuVideoResult GpuVideoRenderer::renderFrameWithOverlay(
     const float crG = 68.0f / 128.0f;          // 0.53125
     const float cbB = 270.0f / 128.0f;         // 2.109375
 
+    // Visible fraction of the pitch-wide textures. The Y texture width is the
+    // reported pitch (yTexWidth) and the UV texture width is yTexWidth/2, so
+    // the same ratio (visibleWidth / pitch) applies to both planes.
+    //
+    // Defensive guard: the pitch must be at least the visible width. If a
+    // malformed report gives a smaller pitch, fall back to full coverage
+    // (scale 1.0) rather than producing a scale > 1 (which would sample outside
+    // the texture) or a divide-by-zero.
+    const float uvScaleX =
+        (yTexWidth >= frame.width && yTexWidth != 0)
+            ? static_cast<float>(frame.width) / static_cast<float>(yTexWidth)
+            : 1.0f;
+
+    // Visible fraction of the surface-tall textures. The decoder's surface is
+    // taller than the visible picture (e.g. a 1080-line stream decodes to a
+    // 1088-line surface; the extra rows are bottom padding the decoder fills
+    // with a repeat of the last real row). The Y texture height is
+    // frame.surfaceHeight and the UV texture height is frame.surfaceHeight/2,
+    // so the same ratio (visibleHeight / surfaceHeight) applies to both planes.
+    // Sampling only the top fraction avoids showing the padding rows and avoids
+    // vertically compressing the picture (1080/1088 at 1080p).
+    //
+    // Defensive guard: the surface must be at least the visible height. If a
+    // malformed report gives a smaller surface, fall back to full coverage
+    // (scale 1.0) rather than producing a scale > 1 or a divide-by-zero.
+    const float uvScaleY =
+        (frame.surfaceHeight >= frame.height && frame.surfaceHeight != 0)
+            ? static_cast<float>(frame.height) /
+                  static_cast<float>(frame.surfaceHeight)
+            : 1.0f;
+
     // yuvOffset
     cb[0] = 16.0f / 255.0f;
     cb[1] = 128.0f / 255.0f;
     cb[2] = 128.0f / 255.0f;
     cb[3] = 0.0f;
     // uvScale
-    cb[4] = 1.0f;
-    cb[5] = 1.0f;
+    cb[4] = uvScaleX;
+    cb[5] = uvScaleY;
     cb[6] = 0.0f;
     cb[7] = 0.0f;
     // uvOffset
@@ -749,9 +841,17 @@ GpuVideoResult GpuVideoRenderer::renderFrameWithOverlay(
     cb[9] = 0.0f;
     cb[10] = 0.0f;
     cb[11] = 0.0f;
-    // chromaOffset (half-UV-texel chroma-siting correction)
-    cb[12] = 0.5f / static_cast<float>(frame.width / 2);
-    cb[13] = 0.5f / static_cast<float>(frame.surfaceHeight / 2);
+    // chromaOffset (chroma-siting correction).
+    //
+    // The decoder outputs NV12 with LEFT-sited (MPEG-2 style) 4:2:0 chroma:
+    // the chroma sample for output pixels (2k, 2k+1) is the UV texel k. With
+    // point sampling, sampling the UV texture at uvCoord.x = x/2 (in UV texels)
+    // selects exactly texel floor(x/2), which is the correct left-sited chroma
+    // for output pixel x. Therefore NO half-texel offset is needed: adding one
+    // would shift odd output pixels onto the next chroma texel (a 1-texel
+    // comb/zigzag artifact). Set the offset to 0.
+    cb[12] = 0.0f;
+    cb[13] = 0.0f;
     cb[14] = 0.0f;
     cb[15] = 0.0f;
     // coeffR
@@ -807,7 +907,8 @@ GpuVideoResult GpuVideoRenderer::renderFrameWithOverlay(
         ovCi.numslices = 1;
         ovCi.format = GNM_FMT_R8G8B8A8_UNORM;
         ovCi.tilemodehint = GNM_TM_DISPLAY_LINEAR_ALIGNED;
-        ovCi.mingpumode = GNM_GPU_BASE;
+        // Match the console GPU mode (see the Y texture above).
+        ovCi.mingpumode = sceGnmGpuMode();
         ovCi.numfragments = 1;
         gerr = sceGnmCreateTexture(&impl->overlayTex, &ovCi);
         if (gerr != GNM_ERROR_OK) {
@@ -1027,7 +1128,8 @@ GpuVideoResult GpuVideoRenderer::blendOverlay(const void* overlayRgba,
     ovCi.numslices = 1;
     ovCi.format = GNM_FMT_R8G8B8A8_UNORM;
     ovCi.tilemodehint = GNM_TM_DISPLAY_LINEAR_ALIGNED;
-    ovCi.mingpumode = GNM_GPU_BASE;
+    // Match the console GPU mode (see the Y texture above).
+    ovCi.mingpumode = sceGnmGpuMode();
     ovCi.numfragments = 1;
     GnmError gerr = sceGnmCreateTexture(&impl->overlayTex, &ovCi);
     if (gerr != GNM_ERROR_OK) {

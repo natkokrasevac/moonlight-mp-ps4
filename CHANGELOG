@@ -1,15 +1,36 @@
-v1.00 - 2026-09-05
-	 Initial Release
+V2.00 - 2026-09-12
+	Full PS4 Pro Support
+	HEVC and 4K streams implemented
+	Shader uppdates for decoded HEVC conversion
+	Added codec selection
+	Added in-use codec to stream statistics overlay
+	Added bitrate recommendation (Moonlight convention)
+	Added resolution/framerate/bitrate dependet codec type selection
+	Removed SPSfixup/h264bitstresm library: not needed, potentially detrimental
+	Bug fixes in videodecoder configuration
+	Fixed AudioOut intermittent audio failure on launch
 
-v1.01 - 2026-09-05
-	 Fixed decoder starvation by increasing decode pipeline depth
+V1.20 - 2026-09-09 (unreleased)
+	Initial PS4 Pro support
+	Full 4K UI and stream support (h264 only for now)
+	unified video path for stream and non-stream UI
+	base/neo mode dependent video_out configuration
 
-V1.10 - 2026-09-07
-	 Change from multi-threaded CPU to GPU accelerated NV12->RGBA conversion 
-	 Color conversion to BT.709, more accurate for HD h264 streams
-	 Change stream overlays from CPU blit into frame buffer to GPU alpha blend
-	 Updated stream statistics to show total frame time.
+V1.12 - 2026-09-08 (limited release)
+	Added Bit Rate setting 10,25,50,75 Mbps
+	Reversed CHANGELOG order
 
 V1.11 - 2026-09-08
-	 Fixed an empty host list bug which resulted in button presses not working
-	 
+	Fixed an empty host list bug which resulted in button presses not working
+
+V1.10 - 2026-09-07
+	Change from multi-threaded CPU to GPU accelerated NV12->RGBA conversion 
+	Color conversion to BT.709, more accurate for HD h264 streams
+	Change stream overlays from CPU blit into frame buffer to GPU alpha blend
+	Updated stream statistics to show total frame time.
+
+v1.01 - 2026-09-05
+	Fixed decoder starvation by increasing decode pipeline depth
+
+v1.00 - 2026-09-05
+	Initial Release

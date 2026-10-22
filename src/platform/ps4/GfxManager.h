@@ -60,9 +60,15 @@ struct GfxResult {
 /// Responsibilities:
 ///   - Initialize graphics and video output.
 ///   - Own all persistent frame resources and graphics memory.
-///   - Acquire a writable frame, clear it via CPU writes, and present it.
+///   - Acquire a writable frame, clear it via a GPU fill, and present it.
 ///   - Synchronize frame reuse against display usage.
 ///   - Shut down graphics resources deterministically.
+///
+/// The framebuffer is a TILING_MODE_TILE (tiled) A8B8G8R8_SRGB surface. The
+/// tiled layout is required for >1080p (4K) output on retail PS4 Pro hardware
+/// and is used at all resolutions here. Because the memory is tiled, the CPU
+/// cannot write pixels directly; all framebuffer writes (clear, UI, video) go
+/// through the GPU.
 ///
 /// This class is main-thread owned. No rendering worker thread is created.
 class GfxManager {
@@ -92,12 +98,17 @@ public:
     /// time. Must be followed by clear() and endFrame().
     GfxResult beginFrame();
 
-    /// Clear the active framebuffer to the given color using CPU writes.
+    /// Clear the active framebuffer to the given color using a GPU fill.
     /// Requires an active frame (after beginFrame()).
     /// The color is a 32-bit RGBA value (0xAABBGGRR in memory, i.e. byte 0 = R).
+    ///
+    /// The framebuffer is a TILING_MODE_TILE surface, so a CPU memset would not
+    /// produce a correct visual clear. This issues a GPU DMA constant fill over
+    /// the whole tiled buffer (every pixel word is written with the color) and
+    /// waits for the GPU to complete before returning.
     GfxResult clear(uint32_t color);
 
-    /// Finish CPU-side frame preparation and present the completed frame.
+    /// Finish frame preparation and present the completed frame.
     /// Requires an active frame. Advances the frame index.
     GfxResult endFrame();
 
@@ -123,22 +134,57 @@ public:
     /// Valid between beginFrame() and endFrame().
     uint32_t currentFrameIndex() const;
 
-    /// Returns a raw CPU-accessible pointer to the current frame's framebuffer
-    /// (the frame being prepared by beginFrame()). Valid between beginFrame()
-    /// and endFrame(). The memory is RGBA8 (A8B8G8R8_SRGB) tightly packed with
-    /// row stride framebufferStrideBytes(). Returns nullptr if no frame is
+    /// Returns a raw pointer to the current frame's framebuffer (the frame
+    /// being prepared by beginFrame()). Valid between beginFrame() and
+    /// endFrame(). The memory is a TILING_MODE_TILE A8B8G8R8_SRGB surface; the
+    /// returned address is the tiled buffer base, used as the GPU render-target
+    /// base by the GPU UI/video renderers. Returns nullptr if no frame is
     /// active or the manager is not initialized.
     ///
-    /// This is the project-owned framebuffer access used by UiBlitter to copy
-    /// compositor pixels into the current VideoOut slot. It intentionally does
-    /// not expose any OpenOrbis SDK structures (OrbisVideoOut*, direct-memory
-    /// internals, or VideoOut handles).
+    /// This is the project-owned framebuffer access used by the GPU renderers
+    /// to draw into the current VideoOut slot. It intentionally does not expose
+    /// any OpenOrbis SDK structures (OrbisVideoOut*, direct-memory internals,
+    /// or VideoOut handles).
     void* currentFramebuffer();
 
     /// Returns the row stride in bytes of the framebuffer returned by
     /// currentFramebuffer(). For the linear A8B8G8R8_SRGB layout this equals
     /// width * 4 (tightly packed, no padding).
+    ///
+    /// NOTE: The framebuffer is now TILING_MODE_TILE, so the CPU does not write
+    /// pixels row-by-row and this value is not used by the GPU renderers (they
+    /// derive the tiled pitch from the render-target descriptor). It is
+    /// retained for the legacy linear-layout accessor contract and returns
+    /// width * 4.
     size_t framebufferStrideBytes() const;
+
+    // --- PS4 Pro / 4K capability detection ----------------------------------
+
+    /// Returns true if the console is a PS4 Pro / NEO (sceKernelIsNeoMode()
+    /// returned non-zero). This is a static hardware property; it does not
+    /// change at runtime. Valid after initialize().
+    bool isNeoMode() const;
+
+    /// Returns true if the current VideoOut resolution height exceeds 1080
+    /// (i.e., the display is actually running a >1080p output mode). Queried
+    /// once during initialize() after VideoOut is opened. Valid after
+    /// initialize().
+    bool is4KOutput() const;
+
+    /// Returns true if PS4 Pro processing is available AND active:
+    ///   - The console is a PS4 Pro (isNeoMode()).
+    ///
+    /// Independent of the current output resolution — a Pro on a 1080p screen
+    /// still returns true (it can do H.265/HEVC decode). Drives H.265/HEVC
+    /// decode support and codec settings. Valid after initialize().
+    bool isPro() const;
+
+    /// Returns true if 4K output processing is available AND active:
+    ///   - The current VideoOut is running a >1080p output (is4KOutput()).
+    ///
+    /// Drives framebuffer dimensions, UI 2x scaling, and the 4K video
+    /// pipeline. Valid after initialize().
+    bool is4KEnabled() const;
 
     /// Opaque pointer to the private implementation state. This keeps all
     /// OpenOrbis SDK types out of the public header. The definition of Impl lives
@@ -164,6 +210,16 @@ private:
 
     uint32_t m_frameIndex;   ///< Current frame index (0 or 1).
     bool     m_frameActive;  ///< Whether a frame is currently being prepared.
+
+    // --- Framebuffer dimensions (dynamic; 1080p or 4K) ----------------------
+
+    uint32_t m_fbWidth;      ///< Framebuffer width in pixels.
+    uint32_t m_fbHeight;     ///< Framebuffer height in pixels.
+
+    // --- PS4 Pro / 4K capability state --------------------------------------
+
+    bool m_isNeoMode;        ///< sceKernelIsNeoMode() != 0 (PS4 Pro hardware).
+    bool m_is4KOutput;       ///< Current VideoOut resolution height > 1080.
 
     // --- Private implementation (SDK types live in GfxManager.cpp) ---------
 

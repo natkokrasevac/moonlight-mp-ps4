@@ -41,13 +41,47 @@ namespace ml {
 /// Stream resolution.
 enum class StreamResolution : uint8_t {
     R720p,
-    R1080p
+    R1080p,
+    R4K
 };
 
 /// Stream frame rate.
 enum class StreamFrameRate : uint8_t {
     Fps30,
     Fps60
+};
+
+/// Stream video bitrate (Mbps).
+///
+/// The presets follow the standard Moonlight client values (5/10/20/40/80
+/// Mbps) so this client behaves like the rest of the Moonlight ecosystem.
+///
+/// NOTE: these values deliberately do NOT sit on the H.264/HEVC Annex A level
+/// MaxBR boundaries (which would be 14/20/50/135/240 for AVC High profile).
+/// The decoder level is selected independently as the MAXIMUM of a
+/// resolution-derived floor and a bitrate-derived requirement (see
+/// VideoDecoder.cpp), so the configured level always covers the stream
+/// regardless of whether the bitrate sits on a boundary. See
+/// src/ui/StreamBitrateLut.h for the full rationale.
+enum class StreamBitrate : uint8_t {
+    B5,    ///< 5 Mbps.
+    B10,   ///< 10 Mbps.
+    B20,   ///< 20 Mbps.
+    B40,   ///< 40 Mbps.
+    B80    ///< 80 Mbps.
+};
+
+/// Stream video codec preference.
+///
+/// The persisted preference is honored only when the console is a PS4 Pro
+/// (isPro()): H.265/HEVC decode is only available on Pro hardware. On a
+/// non-Pro console (or a non-Pro build), the decoder always falls back to
+/// H.264 regardless of this setting (see MoonlightApp::handleActivateApplication).
+enum class StreamCodec : uint8_t {
+    Auto,   ///< Use H.265/HEVC if the host reports HEVC support AND isPro();
+            ///< otherwise H.264/AVC. Default.
+    H264,   ///< Always H.264/AVC.
+    H265    ///< Always H.265/HEVC (only honored when isPro()).
 };
 
 /// Presentation style for the Host List and App List screens.
@@ -65,6 +99,11 @@ enum class PresentationStyle : uint8_t {
 struct Settings {
     StreamResolution resolution = StreamResolution::R1080p;
     StreamFrameRate  frameRate  = StreamFrameRate::Fps60;
+    /// Stream video bitrate. Default 20 Mbps (matches the auto-selected
+    /// bitrate for the default 1080p60 specs; see StreamBitrateLut.h).
+    StreamBitrate    bitrate    = StreamBitrate::B20;
+    /// Stream video codec preference. Default Auto.
+    StreamCodec      codec      = StreamCodec::Auto;
     bool             quitAppOnStreamExit = false;
     PresentationStyle presentationStyle = PresentationStyle::PlayStation;
     /// When enabled, a non-interactive statistics overlay is shown during an

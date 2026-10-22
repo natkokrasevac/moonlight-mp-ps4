@@ -268,6 +268,13 @@ public:
     /// connected), false otherwise. When false, the outputs are left unchanged.
     bool readNetworkStats(float& rttMs, float& jitterMs) const;
 
+    /// Returns the negotiated video format for the current stream session:
+    /// VIDEO_FORMAT_H264 (0x0001) or VIDEO_FORMAT_H265 (0x0100). Returns 0
+    /// before the video format has been negotiated (i.e. before the decoder
+    /// setup callback fires). Used by MoonlightApp to display the active codec
+    /// in the in-stream statistics overlay.
+    int negotiatedVideoFormat() const;
+
     /// Set the VideoDecoder that receives video callbacks.
     /// `decoder` is a non-owning pointer to an initialized VideoDecoder.
     /// Must be called before start(). The decoder must outlive the active

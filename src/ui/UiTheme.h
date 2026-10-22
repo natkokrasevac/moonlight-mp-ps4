@@ -65,6 +65,13 @@ constexpr uint8_t kDisabledTextR = 140;
 constexpr uint8_t kDisabledTextG = 140;
 constexpr uint8_t kDisabledTextB = 140;
 
+/// Warning / over-recommendation text color (orange). Used by Settings to mark
+/// a value that exceeds the recommended value for the current stream specs
+/// (e.g. a bitrate above the codec's Annex A MaxBR for the resolution/fps).
+constexpr uint8_t kValueWarningR = 255;
+constexpr uint8_t kValueWarningG = 165;
+constexpr uint8_t kValueWarningB = 0;
+
 /// Accent / focus color. Used for focus borders, selection highlights,
 /// and the Pairing PIN display.
 constexpr uint8_t kAccentR = 0xFF;

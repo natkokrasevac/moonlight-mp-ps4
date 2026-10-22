@@ -127,15 +127,6 @@ public:
     /// or its state changes.
     void renderFull(const AddHostRenderState& state, ps4::UiCompositor& comp);
 
-    /// Recompose only the region `dirty` of the Add Host overlay / status
-    /// modal for the given state. Pushes a clip equal to `dirty`, repaints the
-    /// panel background, and redraws the panel content that intersects the
-    /// region. Produces the same pixels as a full compose of the same state.
-    /// Used for field-text / selection / status changes while the overlay is
-    /// open, so the full-screen dim layer is NOT re-applied.
-    void renderRegion(const AddHostRenderState& state, ps4::UiCompositor& comp,
-                      const ps4::Rect& dirty);
-
 private:
     /// Draw the Add Host form overlay (IP/Port entry) into `comp`.
     void drawFormOverlay(const AddHostRenderState& state,
@@ -144,9 +135,6 @@ private:
     /// Draw the Add Host status modal (Checking / Found / Failed) into `comp`.
     void drawStatusModal(const AddHostRenderState& state,
                          ps4::UiCompositor& comp);
-
-    /// True if two rectangles intersect.
-    static bool rectsIntersect(const ps4::Rect& a, const ps4::Rect& b);
 
     // --- State --------------------------------------------------------------
     ps4::FontRasterizer* m_fonts = nullptr;

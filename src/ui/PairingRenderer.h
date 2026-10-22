@@ -91,8 +91,6 @@ public:
     ps4::Rect bottomLegendBounds() const;
 
     void renderFull(const PairingRenderState& state, ps4::UiCompositor& comp);
-    void renderRegion(const PairingRenderState& state, ps4::UiCompositor& comp,
-                      const ps4::Rect& dirty);
 
     const ps4::CpuImage& atlasImage() const { return m_atlasImg; }
 
@@ -103,7 +101,6 @@ private:
     void drawTopBar(ps4::UiCompositor& comp);
     void drawSeparators(ps4::UiCompositor& comp);
     void drawLegend(const PairingRenderState& state, ps4::UiCompositor& comp);
-    static bool rectsIntersect(const ps4::Rect& a, const ps4::Rect& b);
 
     ps4::FontRasterizer* m_fonts = nullptr;
     ps4::CpuImage m_atlasImg;

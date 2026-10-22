@@ -183,11 +183,6 @@ ps4::Rect AddHostRenderer::statusButtonBounds() const {
                      panel.w + pad * 2, static_cast<int>(buttonHeight) + pad * 2};
 }
 
-bool AddHostRenderer::rectsIntersect(const ps4::Rect& a, const ps4::Rect& b) {
-    return a.x < b.x + b.w && a.x + a.w > b.x &&
-           a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -198,58 +193,21 @@ void AddHostRenderer::renderFull(const AddHostRenderState& state,
         return;
     }
 
-    // 1. Full-screen dim layer (translucent black). The base Host List is
-    //    already present in the surface; the dim is composited over it.
-    comp.fillRect(0, 0, 1920, 1080, 0, 0, 0, UiTheme::kDimAlpha);   // ~0.55 alpha
-
-    // 2. Centered panel (opaque/semi-opaque).
+    // Centered panel (opaque/semi-opaque). No full-screen dim layer is applied
+    // (removed for the GPU UI path; the Add Host panel draws directly over the
+    // base screen, consistent with PS UI presentation).
     const ps4::Rect panel = panelBounds(state);
     comp.fillRect(panel.x, panel.y, panel.w, panel.h,
                   UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 250);
     comp.strokeRect(panel.x, panel.y, panel.w, panel.h, 2,
                     UiTheme::kPanelBorderR, UiTheme::kPanelBorderG, UiTheme::kPanelBorderB, 255);
 
-    // 3. Panel content.
+    // Panel content.
     if (state.state == AddHostPresentationState::Form) {
         drawFormOverlay(state, comp);
     } else {
         drawStatusModal(state, comp);
     }
-}
-
-void AddHostRenderer::renderRegion(const AddHostRenderState& state,
-                                   ps4::UiCompositor& comp,
-                                   const ps4::Rect& dirty) {
-    if (!m_fonts) {
-        return;
-    }
-    if (!comp.pushClip(dirty)) {
-        return;   // Empty clip; nothing to recompose.
-    }
-
-    // Repaint the panel background intersecting the dirty region. All Add Host
-    // content lives inside the opaque panel, so the panel background is the
-    // base for content recomposition (no dim handling needed inside the opaque
-    // panel).
-    const ps4::Rect panel = panelBounds(state);
-    if (rectsIntersect(dirty, panel)) {
-        comp.fillRect(panel.x, panel.y, panel.w, panel.h,
-                      UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 250);
-        comp.strokeRect(panel.x, panel.y, panel.w, panel.h, 2,
-                        UiTheme::kPanelBorderR, UiTheme::kPanelBorderG, UiTheme::kPanelBorderB, 255);
-    }
-
-    // Redraw the panel content. The clip restricts all drawing to the dirty
-    // region, so only the affected content is repainted. The full content draw
-    // is used (rather than per-row draws) to keep the geometry single-sourced
-    // in drawFormOverlay / drawStatusModal.
-    if (state.state == AddHostPresentationState::Form) {
-        drawFormOverlay(state, comp);
-    } else {
-        drawStatusModal(state, comp);
-    }
-
-    comp.popClip();
 }
 
 // ---------------------------------------------------------------------------

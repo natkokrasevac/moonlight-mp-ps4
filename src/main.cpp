@@ -52,7 +52,7 @@
 // in <orbis/libkernel.h>; the runtime reads it to size the libc heap. This
 // mirrors the SCE reference's `extern "C" size_t sceLibcHeapSize` override.
 // -------------------------------------------------------------------------------
-extern "C" uint64_t sceLibcHeapSize = 128ull * 1024ull * 1024ull;
+extern "C" uint64_t sceLibcHeapSize = 256ull * 1024ull * 1024ull;
 
 int main(void)
 {

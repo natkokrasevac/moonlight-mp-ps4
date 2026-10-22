@@ -78,6 +78,7 @@ struct FontRasterizer::Impl {
     FT_Face titleFace     = nullptr;  ///< Noto Sans Regular (title).
     FT_Face boldSmallFace = nullptr;  ///< Noto Sans Regular (bold small).
     FT_Face regularSmallFace = nullptr; ///< Noto Sans ExtraLight (regular small).
+    FT_Face regularBoldFace = nullptr;  ///< Noto Sans Regular (body-size bold).
 
     // --- Lifecycle state ----------------------------------------------------
     bool initialized = false;   ///< Full initialize() succeeded.
@@ -103,7 +104,7 @@ struct FontRasterizer::Impl {
         std::vector<uint8_t> coverage; ///< Tight A8 coverage (width*height).
     };
 
-    /// Cache key: packed {FontFace, uint32_t codepoint}. Face is 0..5 and
+    /// Cache key: packed {FontFace, uint32_t codepoint}. Face is 0..6 and
     /// codepoint is a full uint32_t, so the key is a single uint64_t.
     using GlyphCacheKey = uint64_t;
 
@@ -214,6 +215,10 @@ void FontRasterizer::shutdown() {
         FT_Done_Face(m_impl->regularSmallFace);
         m_impl->regularSmallFace = nullptr;
     }
+    if (m_impl->regularBoldFace) {
+        FT_Done_Face(m_impl->regularBoldFace);
+        m_impl->regularBoldFace = nullptr;
+    }
 
     // Destroy the FreeType library.
     if (m_impl->libraryCreated && m_impl->library) {
@@ -306,6 +311,10 @@ bool FontRasterizer::openFonts() {
     if (!openFace(kRegularPath, titleSize, m_impl->titleFace)) return false;
     if (!openFace(kRegularPath, boldSmallSize, m_impl->boldSmallFace)) return false;
     if (!openFace(kExtraLightPath, regularSmallSize, m_impl->regularSmallFace)) return false;
+    // RegularBold: body-size bold for emphasized values (e.g. the Settings
+    // bitrate warning). Bound to the Regular file at the bold size, matching
+    // the existing Bold semantics (no true Bold weight is shipped).
+    if (!openFace(kRegularPath, boldSize, m_impl->regularBoldFace)) return false;
 
     fontDiagPrint("[font] Noto Sans Regular/ExtraLight font faces opened and configured");
     return true;
@@ -394,6 +403,8 @@ void* FontRasterizer::resolveFontHandle(FontFace face) const {
         return m_impl->boldSmallFace;
     case FontFace::RegularSmall:
         return m_impl->regularSmallFace;
+    case FontFace::RegularBold:
+        return m_impl->regularBoldFace;
     }
     return nullptr;
 }

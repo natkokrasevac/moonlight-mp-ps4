@@ -115,13 +115,6 @@ This project uses:
 
 If you want to make your own fork, please change the Title ID and Content ID in `config/config_pkg`. This will recalculate `param.sfo`
 
-The project includes the h264bitstream library and code for SPSfixup, but it is disabled in the build.  
-Due to AU lifetime handling in this project, this code is likely not necessary. If desired, it can be enabled at compile time by changing:
-
-`#define ML_ENABLE_SPS_FIXUP 0` to `#define ML_ENABLE_SPS_FIXUP 1`
-
-in `src/moonlight/StreamSessionManager.cpp`
-
 ### Building
 
 `Makefile` is a wrapper around `CMake` and packaging scripts. It should work without modification if environment variable is set. If compiler paths are not correct, edit `cmake/toolchain-ps4-[macos/linux].cmake`

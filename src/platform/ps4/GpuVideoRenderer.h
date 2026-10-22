@@ -25,10 +25,11 @@
 //     .sb files packaged under /app0/assets/misc/).
 //   - Own the OpenGNM command buffer, EOP sync label, and constant buffer.
 //   - Bind the decoded NV12 Y/UV planes as GPU-readable linear textures.
-//   - Draw a fullscreen triangle into the current LINEAR WC_GARLIC VideoOut
-//     render target, performing BT.709 NV12→BGRA in the pixel shader.
+//   - Draw a fullscreen triangle into the current TILE WC_GARLIC VideoOut
+//     render target (the framebuffer is registered with VideoOut as
+//     TILING_MODE_TILE), performing BT.709 NV12→BGRA in the pixel shader.
 //   - Synchronize GPU completion (EOP) before returning, so the caller can
-//     safely run the CPU UI overlay composition over the same framebuffer.
+//     safely run the GPU UI overlay composition over the same framebuffer.
 //
 // This module is deliberately narrow. It does NOT redesign GfxManager, does
 // NOT create a general graphics abstraction layer, does NOT use compute
@@ -36,10 +37,10 @@
 // ownership model. It reuses the exact state/setup patterns from the working
 // OpenGNM triangle smoke test (gpu_triangle_smoke.c).
 //
-// The UI path is untouched: the CPU UI compositor/blitter continues to write
-// into the framebuffer after the GPU video pass completes. The GPU video pass
-// must be fully complete (EOP reached) before any CPU code writes into the
-// same framebuffer, which the caller guarantees by waiting for this module's
+// The UI path is untouched: the GPU UI compositor continues to draw into the
+// framebuffer after the GPU video pass completes. The GPU video pass must be
+// fully complete (EOP reached) before any other GPU draw writes into the same
+// framebuffer, which the caller guarantees by waiting for this module's
 // renderFrame() to return before composing the UI overlay.
 //
 // OpenOrbis SDK types are confined to the implementation file.
@@ -124,9 +125,15 @@ public:
 
     /// Initialize the GPU video renderer. Loads the shader binaries from
     /// `/app0/assets/misc/` and allocates the OpenGNM command buffer, EOP
-    /// label, and constant buffer. Must be called before renderFrame().
-    /// After failure the object remains safe to shut down or destroy.
-    GpuVideoResult initialize();
+    /// label, and constant buffer. `fbWidth`/`fbHeight` are the framebuffer
+    /// (output) dimensions (1920x1080 or 3840x2160); the render target is
+    /// created to cover the full framebuffer. The decoded NV12 frame is bound
+    /// per-frame at its native (stream) resolution and scaled to fill the
+    /// output via the shader UVs (nearest-neighbor), so the same renderer
+    /// handles 1080p→1080p, 1080p→4K upscale, and 4K→4K. Must be called before
+    /// renderFrame(). After failure the object remains safe to shut down or
+    /// destroy.
+    GpuVideoResult initialize(uint32_t fbWidth, uint32_t fbHeight);
 
     /// Release all GPU video renderer resources. Idempotent.
     void shutdown();

@@ -33,6 +33,7 @@
 #include "UiManager.h"
 
 #include "UiStrings.h"
+#include "StreamBitrateLut.h"   // ui::autoBitrateIndexFor / clampResolutionForCodec
 
 #include <cstdio>    // printf, fflush, snprintf
 #include <cstring>   // memset
@@ -220,8 +221,16 @@ struct UiManager::Impl {
 
     // --- Settings overlay state ---------------------------------------------
     bool settingsOverlayOpen = false;   ///< Whether the Settings overlay is open.
-    int  settingsSelectedRow = 0;       ///< Selected settings row (0..6).
+    int  settingsSelectedRow = 0;       ///< Selected settings row (0..8).
     SettingsViewState settingsView;     ///< Editable working copy.
+    /// Whether 4K output is available (current VideoOut resolution >1080p AND
+    /// PS4 Pro build active). When false, the Resolution option cycles only
+    /// 720p/1080p. Pushed from MoonlightApp via set4KAvailable().
+    bool fourKAvailable = false;
+    /// Whether HEVC/H.265 is available (PS4 Pro AND PS4 Pro build active).
+    /// When false, the Codec option cycles only Auto/AVC and never offers
+    /// HEVC. Pushed from MoonlightApp via setHevcAvailable().
+    bool hevcAvailable = false;
 
     // --- Help screen state --------------------------------------------------
     /// Whether the Help screen is currently open.
@@ -280,6 +289,25 @@ struct UiManager::Impl {
     /// Returns true while the current screen is one of the stream presentation
     /// screens.
     bool isStreamScreen() const;
+
+    /// Recompute the working-copy bitrate from the current codec / resolution
+    /// / frame-rate selection so the auto-selected bitrate guarantees correct
+    /// decoder level selection for the chosen stream specs. The user may still
+    /// change the bitrate manually afterwards. No-op when the Settings working
+    /// copy is not in use.
+    void applyAutoBitrate();
+
+    /// Clamp the working-copy resolution to a codec-valid value. When the codec
+    /// resolves to HEVC, 720p is not a valid resolution (no HEVC 720p preset),
+    /// so it is forced to 1080p. No-op otherwise.
+    void clampResolutionForCodec();
+
+    /// Apply one cycle step to the Settings row at `rowIndex` in the given
+    /// `direction` (+1 = forward/up, -1 = backward/down). Multi-option rows
+    /// (Resolution, Bitrate, Codec) roll over in both directions; two-option
+    /// rows are simple toggles (direction is irrelevant). Used by both the
+    /// Left/Right input and the Accept input (which always steps forward).
+    void cycleSettingsRow(int rowIndex, int direction);
 };
 
 // ---------------------------------------------------------------------------
@@ -717,6 +745,31 @@ void UiManager::setShowQuitAppDialog(bool show) {
     }
 }
 
+void UiManager::set4KAvailable(bool available) {
+    if (!m_impl) {
+        return;
+    }
+    m_impl->fourKAvailable = available;
+    // If 4K is no longer available and the working copy is set to 4K, clamp it
+    // back to 1080p so the Settings overlay never shows an unavailable value.
+    if (!available && m_impl->settingsView.resolutionIndex == 2) {
+        m_impl->settingsView.resolutionIndex = 1;
+    }
+}
+
+void UiManager::setHevcAvailable(bool available) {
+    if (!m_impl) {
+        return;
+    }
+    m_impl->hevcAvailable = available;
+    // If HEVC is no longer available and the working copy is set to HEVC,
+    // clamp it back to Auto so the Settings overlay never shows an
+    // unavailable value.
+    if (!available && m_impl->settingsView.codecIndex == 2) {
+        m_impl->settingsView.codecIndex = 0;
+    }
+}
+
 void UiManager::setGridColumns(int hostColumns, int appColumns) {
     if (!m_impl) {
         return;
@@ -849,6 +902,8 @@ bool UiManager::buildStreamStatisticsRenderState(StreamStatisticsRenderState& ou
         snprintf(buf, sizeof(buf), "%.1f Mbps", s.bitrateMbps);
         state.bitrate = buf;
     }
+    // Codec display string (already formatted by MoonlightApp).
+    state.codec = s.codec;
     if (s.decodeMs > 0.0f) {
         snprintf(buf, sizeof(buf), "%.1f ms", s.decodeMs);
         state.decodeTime = buf;
@@ -1060,39 +1115,68 @@ bool UiManager::buildSettingsRenderState(SettingsRenderState& out) const {
     state.crossIsAccept = m_impl->crossIsAccept;
 
     auto addRow = [&](const char* label, const char* value, bool enabled,
-                      int index) {
+                      int index, bool valueWarning = false) {
         SettingsRowRenderData row;
         row.label = label;
         row.value = value;
         row.enabled = enabled;
         row.selected = enabled && (index == m_impl->settingsSelectedRow);
+        row.valueWarning = valueWarning;
         state.rows.push_back(std::move(row));
     };
 
+    // Bitrate value string from the bitrate index (0=5, 1=10, 2=20, 3=40,
+    // 4=80).
+    const char* bitrateValue =
+        (m_impl->settingsView.bitrateIndex == 0) ? "5 Mbps" :
+        (m_impl->settingsView.bitrateIndex == 1) ? "10 Mbps" :
+        (m_impl->settingsView.bitrateIndex == 3) ? "40 Mbps" :
+        (m_impl->settingsView.bitrateIndex == 4) ? "80 Mbps" : "20 Mbps";
+
+    // Codec value string from the codec index (0=Auto, 1=AVC, 2=HEVC).
+    const char* codecValue =
+        (m_impl->settingsView.codecIndex == 1) ? "AVC (H.264)" :
+        (m_impl->settingsView.codecIndex == 2) ? "HEVC (H.265)" : "Auto";
+
     addRow("Resolution",
-           m_impl->settingsView.resolutionIndex == 0 ? "720p" : "1080p",
+           m_impl->settingsView.resolutionIndex == 2 ? "4K" :
+           (m_impl->settingsView.resolutionIndex == 0 ? "720p" : "1080p"),
            true, 0);
     addRow("Frame Rate",
            m_impl->settingsView.frameRateIndex == 0 ? "30 FPS" : "60 FPS",
            true, 1);
+    // Flag the bitrate value when it exceeds the recommended bitrate for the
+    // current codec / resolution / frame-rate (the standard Moonlight client
+    // value for those specs). The renderer draws such values emphasized
+    // (orange, bold). A value at or below the recommendation is left in the
+    // normal style.
+    const int recommendedBitrateIndex = ui::autoBitrateIndexFor(
+        m_impl->settingsView.codecIndex,
+        m_impl->settingsView.resolutionIndex,
+        m_impl->settingsView.frameRateIndex,
+        m_impl->hevcAvailable);
+    const bool bitrateOverRecommended =
+        m_impl->settingsView.bitrateIndex > recommendedBitrateIndex;
+    addRow("Bitrate", bitrateValue, true, 2, bitrateOverRecommended);
+    addRow("Codec", codecValue, true, 3);
     addRow("Quit App on Exit",
            m_impl->settingsView.quitAppOnStreamExit ? "On" : "Off",
-           true, 2);
+           true, 4);
     addRow("Stream Statistics",
            m_impl->settingsView.streamStatisticsEnabled ? "On" : "Off",
-           true, 3);
+           true, 5);
     addRow("Presentation Style",
            m_impl->settingsView.presentationStyleIndex == 0 ? "CrossBar" : "Grid",
-           true, 4);
+           true, 6);
     addRow("Show Quit App Dialog",
            m_impl->settingsView.showQuitAppDialog ? "On" : "Off",
-           true, 5);
+           true, 7);
     addRow("Speakers",
            m_impl->settingsView.muteHostSpeakers ? "Muted" : "Unmuted",
-           true, 6);
+           true, 8);
     addRow("Game Optimization",
            m_impl->settingsView.optimizeGameSettings ? "On" : "Off",
-           true, 7);
+           true, 9);
 
     out = std::move(state);
     return true;
@@ -1577,7 +1661,7 @@ void UiManager::processInput(const UiInput& input) {
         if (input.upPressed && m_impl->settingsSelectedRow > 0) {
             m_impl->settingsSelectedRow--;
         }
-        if (input.downPressed && m_impl->settingsSelectedRow < 7) {
+        if (input.downPressed && m_impl->settingsSelectedRow < 9) {
             m_impl->settingsSelectedRow++;
         }
         if (m_impl->settingsSelectedRow != prevRow) {
@@ -1585,90 +1669,17 @@ void UiManager::processInput(const UiInput& input) {
         }
 
         if (input.leftPressed || input.rightPressed) {
-            switch (m_impl->settingsSelectedRow) {
-            case 0:
-                m_impl->settingsView.resolutionIndex =
-                    (m_impl->settingsView.resolutionIndex == 0) ? 1 : 0;
-                break;
-            case 1:
-                m_impl->settingsView.frameRateIndex =
-                    (m_impl->settingsView.frameRateIndex == 0) ? 1 : 0;
-                break;
-            case 2:
-                m_impl->settingsView.quitAppOnStreamExit =
-                    !m_impl->settingsView.quitAppOnStreamExit;
-                break;
-            case 3:
-                m_impl->settingsView.streamStatisticsEnabled =
-                    !m_impl->settingsView.streamStatisticsEnabled;
-                break;
-            case 4:
-                m_impl->settingsView.presentationStyleIndex =
-                    (m_impl->settingsView.presentationStyleIndex == 0) ? 1 : 0;
-                m_impl->presentationStyle =
-                    (m_impl->settingsView.presentationStyleIndex == 0)
-                        ? ml::PresentationStyle::PlayStation
-                        : ml::PresentationStyle::Grid;
-                break;
-            case 5:
-                m_impl->settingsView.showQuitAppDialog =
-                    !m_impl->settingsView.showQuitAppDialog;
-                break;
-            case 6:
-                m_impl->settingsView.muteHostSpeakers =
-                    !m_impl->settingsView.muteHostSpeakers;
-                break;
-            case 7:
-                m_impl->settingsView.optimizeGameSettings =
-                    !m_impl->settingsView.optimizeGameSettings;
-                break;
-            default:
-                break;
-            }
+            // Left cycles down (backward), Right cycles up (forward). For
+            // multi-option rows (Resolution, Bitrate, Codec) this rolls over in
+            // both directions; two-option rows are toggles.
+            const int direction = input.leftPressed ? -1 : +1;
+            m_impl->cycleSettingsRow(m_impl->settingsSelectedRow, direction);
             m_impl->pendingSoundIntent = UiSoundIntent::Accept;
         }
 
         if (input.acceptPressed) {
-            switch (m_impl->settingsSelectedRow) {
-            case 0:
-                m_impl->settingsView.resolutionIndex =
-                    (m_impl->settingsView.resolutionIndex == 0) ? 1 : 0;
-                break;
-            case 1:
-                m_impl->settingsView.frameRateIndex =
-                    (m_impl->settingsView.frameRateIndex == 0) ? 1 : 0;
-                break;
-            case 2:
-                m_impl->settingsView.quitAppOnStreamExit =
-                    !m_impl->settingsView.quitAppOnStreamExit;
-                break;
-            case 3:
-                m_impl->settingsView.streamStatisticsEnabled =
-                    !m_impl->settingsView.streamStatisticsEnabled;
-                break;
-            case 4:
-                m_impl->settingsView.presentationStyleIndex =
-                    (m_impl->settingsView.presentationStyleIndex == 0) ? 1 : 0;
-                m_impl->presentationStyle =
-                    (m_impl->settingsView.presentationStyleIndex == 0)
-                        ? ml::PresentationStyle::PlayStation
-                        : ml::PresentationStyle::Grid;
-                break;
-            case 5:
-                m_impl->settingsView.showQuitAppDialog =
-                    !m_impl->settingsView.showQuitAppDialog;
-                break;
-            case 6:
-                m_impl->settingsView.muteHostSpeakers =
-                    !m_impl->settingsView.muteHostSpeakers;
-                break;
-            case 7:
-                m_impl->settingsView.optimizeGameSettings =
-                    !m_impl->settingsView.optimizeGameSettings;
-                break;
-            default:
-                break;
-            }
+            // Accept always steps forward (same as Right).
+            m_impl->cycleSettingsRow(m_impl->settingsSelectedRow, +1);
             m_impl->pendingSoundIntent = UiSoundIntent::Accept;
         }
         return;
@@ -2024,6 +2035,127 @@ bool UiManager::Impl::isStreamScreen() const {
     return screen == UiScreen::StreamExitHint ||
            screen == UiScreen::StreamEmpty ||
            screen == UiScreen::StreamStatistics;
+}
+
+// ---------------------------------------------------------------------------
+// Settings auto-bitrate helpers
+// ---------------------------------------------------------------------------
+
+/// Recompute the working-copy bitrate from the current codec / resolution /
+/// frame-rate selection. The auto-selected bitrate is the standard Moonlight
+/// client value for the chosen specs (see StreamBitrateLut.h); the decoder
+/// level is selected independently as the max of the resolution floor and the
+/// bitrate requirement, so the configured level always covers the stream. The
+/// user may still change the bitrate manually afterwards.
+void UiManager::Impl::applyAutoBitrate() {
+    settingsView.bitrateIndex = ui::autoBitrateIndexFor(
+        settingsView.codecIndex,
+        settingsView.resolutionIndex,
+        settingsView.frameRateIndex,
+        hevcAvailable);
+}
+
+/// Clamp the working-copy resolution to a codec-valid value. When the codec
+/// resolves to HEVC, 720p is not a valid resolution (the SDK HEVC presets
+/// start at 1080p), so it is forced to 1080p.
+void UiManager::Impl::clampResolutionForCodec() {
+    settingsView.resolutionIndex = ui::clampResolutionForCodec(
+        settingsView.codecIndex,
+        settingsView.resolutionIndex,
+        hevcAvailable);
+}
+
+/// Apply one cycle step to the Settings row at `rowIndex` in the given
+/// `direction` (+1 = forward/up, -1 = backward/down). Multi-option rows
+/// (Resolution, Bitrate, Codec) roll over in both directions; two-option rows
+/// are simple toggles (direction is irrelevant).
+void UiManager::Impl::cycleSettingsRow(int rowIndex, int direction) {
+    // Normalize the direction to exactly +1 or -1.
+    const int step = (direction < 0) ? -1 : +1;
+
+    switch (rowIndex) {
+    case 0: {
+        // Cycle resolution. 720p is skipped when the codec resolves to HEVC
+        // (no HEVC 720p preset): the cycle is then 1080p <-> (4K if
+        // available). Otherwise it is 720p -> 1080p -> (4K if available) ->
+        // 720p. Left steps backward, Right steps forward; both roll over.
+        if (!ui::resolution720AllowedForCodec(settingsView.codecIndex,
+                                              hevcAvailable)) {
+            // HEVC: 1080p <-> (4K if available). Two options: a toggle.
+            if (fourKAvailable) {
+                settingsView.resolutionIndex =
+                    (settingsView.resolutionIndex == 2) ? 1 : 2;
+            } else {
+                settingsView.resolutionIndex = 1;
+            }
+        } else if (fourKAvailable) {
+            // Three options: 720p(0) / 1080p(1) / 4K(2), roll over both ways.
+            settingsView.resolutionIndex =
+                (settingsView.resolutionIndex + step + 3) % 3;
+        } else {
+            // Two options: 720p(0) / 1080p(1). A toggle.
+            settingsView.resolutionIndex =
+                (settingsView.resolutionIndex == 0) ? 1 : 0;
+        }
+        // Auto-select the bitrate for the new resolution.
+        applyAutoBitrate();
+        break;
+    }
+    case 1:
+        // Two options: 30 / 60 FPS. A toggle.
+        settingsView.frameRateIndex =
+            (settingsView.frameRateIndex == 0) ? 1 : 0;
+        // Auto-select the bitrate for the new frame rate.
+        applyAutoBitrate();
+        break;
+    case 2:
+        // Cycle bitrate: 5 -> 10 -> 20 -> 40 -> 80 -> 5 (forward), and the
+        // reverse for backward. Manual override: the user may pick any preset.
+        settingsView.bitrateIndex =
+            (settingsView.bitrateIndex + step + 5) % 5;
+        break;
+    case 3:
+        // Cycle codec: Auto -> AVC -> (HEVC if available) -> Auto (forward),
+        // and the reverse for backward.
+        if (hevcAvailable) {
+            settingsView.codecIndex =
+                (settingsView.codecIndex + step + 3) % 3;
+        } else {
+            // Two options: Auto / AVC. A toggle.
+            settingsView.codecIndex =
+                (settingsView.codecIndex == 0) ? 1 : 0;
+        }
+        // If the new codec resolves to HEVC, 720p is no longer valid: clamp
+        // the resolution to 1080p, then auto-select the bitrate.
+        clampResolutionForCodec();
+        applyAutoBitrate();
+        break;
+    case 4:
+        settingsView.quitAppOnStreamExit = !settingsView.quitAppOnStreamExit;
+        break;
+    case 5:
+        settingsView.streamStatisticsEnabled = !settingsView.streamStatisticsEnabled;
+        break;
+    case 6:
+        settingsView.presentationStyleIndex =
+            (settingsView.presentationStyleIndex == 0) ? 1 : 0;
+        presentationStyle =
+            (settingsView.presentationStyleIndex == 0)
+                ? ml::PresentationStyle::PlayStation
+                : ml::PresentationStyle::Grid;
+        break;
+    case 7:
+        settingsView.showQuitAppDialog = !settingsView.showQuitAppDialog;
+        break;
+    case 8:
+        settingsView.muteHostSpeakers = !settingsView.muteHostSpeakers;
+        break;
+    case 9:
+        settingsView.optimizeGameSettings = !settingsView.optimizeGameSettings;
+        break;
+    default:
+        break;
+    }
 }
 
 } // namespace ui
