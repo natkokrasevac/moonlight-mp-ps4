@@ -64,20 +64,22 @@ enum class ControllerInputStreamingState : uint8_t {
 // ControllerInputStreaming
 // ---------------------------------------------------------------------------
 
-/// Forwards one local PS4 controller, keyboard, and mouse to the active
-/// Moonlight stream.
+/// Forwards local PS4 controllers (Player 1 + Player 2 up to 4 players),
+/// keyboard, and mouse to the active Moonlight stream.
 ///
 /// Responsibilities:
-///   - Consume the project-owned ControllerState snapshot from InputManager.
+///   - Consume project-owned ControllerState snapshots from InputManager for
+///     all active local controllers.
+///   - Forward arrival and multi-controller events via moonlight-common-c.
 ///   - Consume the KeyboardEvent/MouseEvent queues from InputManager.
 ///   - Map PS4 controls to the moonlight-common-c controller API.
 ///   - Map PS4 keyboard/mouse events to the moonlight-common-c keyboard/mouse
 ///     API (converting USB HID keycodes to Windows VK codes).
 ///   - Transmit input while the active stream's input channel is ready (gated
 ///     to the active session generation).
-///   - Send a complete initial controller state when input becomes ready.
+///   - Send complete initial controller states when input becomes ready.
 ///   - Send change-only controller updates plus a low-rate periodic refresh.
-///   - Send a neutral controller state on disconnect/stop to avoid stuck
+///   - Send neutral controller states on disconnect/stop to avoid stuck
 ///     buttons.
 ///   - Release all keys/buttons on stop to avoid stuck host input.
 ///   - Preserve video/audio on input failure.
@@ -86,7 +88,7 @@ enum class ControllerInputStreamingState : uint8_t {
 ///   - Own the PS4 pad / keyboard / mouse / UserService lifecycle.
 ///   - Own the Moonlight connection lifecycle.
 ///   - Route gameplay input through UiManager.
-///   - Implement rumble, gyro, multiple controllers, or controller remapping.
+///   - Implement rumble, gyro, or controller remapping.
 ///
 /// Threading: This class is main-thread owned. update() is called once per
 /// main-loop frame after InputManager::poll(). The moonlight-common-c input

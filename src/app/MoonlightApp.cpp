@@ -1319,30 +1319,33 @@ void MoonlightApp::pollInput() {
     // host (ControllerInputStreaming suppresses them via the exit-chord
     // precedence in its button mapping).
     if (m_streamActive && m_controllerInputStreaming &&
-        m_controllerInputStreaming->isActive()) {
-        ps4::ControllerState state;
-        if (m_input->latestControllerState(state)) {
-            // ORBIS_PAD_BUTTON_OPTIONS = 0x00000008, ORBIS_PAD_BUTTON_L3 = 0x00000002.
-            const uint32_t kOptions = 0x00000008u;
-            const uint32_t kL3 = 0x00000002u;
-            if ((state.buttons & kOptions) && (state.buttons & kL3)) {
-                diagPrint("[input] exit chord consumed locally (Options+L3)");
-                // Stop controller forwarding first (sends neutral if usable),
-                // then stop the stream connection.
-                m_controllerInputStreaming->stop();
-                if (m_streamSessionManager) {
-                    m_streamSessionManager->stop();
-                }
+        m_controllerInputStreaming->isActive() && m_input) {
+        for (int i = 0; i < ps4::InputManager::kMaxControllers; ++i) {
+            ps4::ControllerState state;
+            if (m_input->latestControllerState(state, i)) {
+                // ORBIS_PAD_BUTTON_OPTIONS = 0x00000008, ORBIS_PAD_BUTTON_L3 = 0x00000002.
+                const uint32_t kOptions = 0x00000008u;
+                const uint32_t kL3 = 0x00000002u;
+                if ((state.buttons & kOptions) && (state.buttons & kL3)) {
+                    diagPrint("[input] exit chord consumed locally (Options+L3)");
+                    // Stop controller forwarding first (sends neutral if usable),
+                    // then stop the stream connection.
+                    m_controllerInputStreaming->stop();
+                    if (m_streamSessionManager) {
+                        m_streamSessionManager->stop();
+                    }
 
-                // If quit-on-exit is enabled, request a remote application
-                // quit via the existing ApplicationSessionManager quit path.
-                // Local stream teardown does not depend on the remote quit
-                // succeeding; if it fails, the stream still exits locally and
-                // the existing application-session error handling reports it.
-                if (m_settingsManager &&
-                    m_settingsManager->settings().quitAppOnStreamExit) {
-                    diagPrint("[app] quit-on-exit enabled — requesting remote app quit");
-                    handleQuitApplication(m_streamHostId, m_streamAppId);
+                    // If quit-on-exit is enabled, request a remote application
+                    // quit via the existing ApplicationSessionManager quit path.
+                    // Local stream teardown does not depend on the remote quit
+                    // succeeding; if it fails, the stream still exits locally and
+                    // the existing application-session error handling reports it.
+                    if (m_settingsManager &&
+                        m_settingsManager->settings().quitAppOnStreamExit) {
+                        diagPrint("[app] quit-on-exit enabled — requesting remote app quit");
+                        handleQuitApplication(m_streamHostId, m_streamAppId);
+                    }
+                    break;
                 }
             }
         }

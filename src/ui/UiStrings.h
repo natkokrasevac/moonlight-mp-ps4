@@ -103,13 +103,13 @@ constexpr const char* kHelp = "Help";
 constexpr const char* kClose = "Back";
 /// Reset Moonlight (legend action / modal title). Used by the Help screen
 /// bottom legend (Triangle button) and the Reset Moonlight confirmation modal.
-constexpr const char* kResetMoonlight = "Reset Moonlight DX";
+constexpr const char* kResetMoonlight = "Reset Moonlight MP";
 /// Reset Moonlight warning (modal message line 1). Used by the Reset Moonlight
 /// confirmation modal.
 constexpr const char* kResetMoonlightWarning = "All settings and pairings will be lost when resetting.";
 /// Reset Moonlight confirm (modal message line 2). Used by the Reset Moonlight
 /// confirmation modal.
-constexpr const char* kResetMoonlightConfirm = "Do you really want to reset Moonlight DX?";
+constexpr const char* kResetMoonlightConfirm = "Do you really want to reset Moonlight MP?";
 
 // --- Help screen content ---------------------------------------------------
 /// In-stream button assignments (Help section header). Used by the Help screen.
@@ -151,7 +151,7 @@ constexpr const char* kPlanned = "Planned";
 
 // --- Settings footer --------------------------------------------------------
 /// App name (Settings footer). Used by the Settings panel footer.
-constexpr const char* kAppName = "Moonlight DX for PlayStation 4";
+constexpr const char* kAppName = "Moonlight MP for PlayStation 4";
 /// Version label (Settings footer). Used by the Settings panel footer.
 constexpr const char* kVersionLabel = "fourletterworkshop.com";
 /// Version number (Settings footer). Used by the Settings panel footer.

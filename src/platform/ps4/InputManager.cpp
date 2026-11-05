@@ -203,11 +203,20 @@ namespace ps4 {
 
 /// Private implementation of InputManager. Holds all OpenOrbis SDK pad state.
 struct InputManager::Impl {
-    // --- Controller state ---------------------------------------------------
-    int32_t padHandle = -1;      ///< Open pad handle (negative = not open).
-    bool    initialized = false; ///< Whether initialize() succeeded.
+    // --- Controller slots ---------------------------------------------------
+    struct PadSlot {
+        int32_t userId = -1;
+        int32_t padHandle = -1;
+        bool    connected = false;
+        ControllerState latestState;
+    };
 
-    // --- Button state -------------------------------------------------------
+    static constexpr int kSlotCount = InputManager::kMaxControllers;
+    PadSlot slots[kSlotCount];
+    uint32_t pollCounter = 0;
+    bool    initialized = false;
+
+    // --- Button state (combined across connected pads for UI navigation) ---
     uint32_t currentButtons = 0; ///< Current frame button bitmask.
     uint32_t previousButtons = 0; ///< Previous frame button bitmask.
 
@@ -217,8 +226,79 @@ struct InputManager::Impl {
     /// initialization; defaults to true (Cross) if the query is unavailable.
     bool crossIsAccept = true;
 
-    // --- Full gameplay snapshot ---------------------------------------------
-    ControllerState latestState; ///< Full raw/gameplay snapshot (from same poll).
+    // --- Query logged in users and manage pad handles -----------------------
+    void updatePadHandles() {
+        OrbisUserServiceLoginUserIdList userList;
+        memset(&userList, 0, sizeof(userList));
+        int32_t rc = sceUserServiceGetLoginUserIdList(&userList);
+        if (rc != 0) {
+            return;
+        }
+
+        // Populate or maintain slots 1..kSlotCount-1 for secondary users
+        for (int u = 0; u < 4; ++u) {
+            int32_t uid = userList.userId[u];
+            if (uid <= 0 || uid == slots[0].userId) {
+                continue;
+            }
+
+            // Check if this uid is already in an open slot
+            bool alreadyTracked = false;
+            for (int i = 1; i < kSlotCount; ++i) {
+                if (slots[i].userId == uid && slots[i].padHandle >= 0) {
+                    alreadyTracked = true;
+                    break;
+                }
+            }
+            if (alreadyTracked) {
+                continue;
+            }
+
+            // Find an empty slot
+            for (int i = 1; i < kSlotCount; ++i) {
+                if (slots[i].padHandle < 0) {
+                    int32_t handle = scePadOpen(uid, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
+                    if (handle >= 0) {
+                        slots[i].userId = uid;
+                        slots[i].padHandle = handle;
+                        slots[i].connected = false;
+                        slots[i].latestState = ControllerState();
+                        char buf[128];
+                        snprintf(buf, sizeof(buf),
+                                 "[input] opened pad handle %d for user 0x%08X in slot %d",
+                                 handle, uid, i);
+                        inputDiagPrint(buf);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Check if any tracked secondary user has logged out
+        for (int i = 1; i < kSlotCount; ++i) {
+            if (slots[i].padHandle >= 0) {
+                bool stillLogged = false;
+                for (int u = 0; u < 4; ++u) {
+                    if (userList.userId[u] == slots[i].userId) {
+                        stillLogged = true;
+                        break;
+                    }
+                }
+                if (!stillLogged) {
+                    char buf[128];
+                    snprintf(buf, sizeof(buf),
+                             "[input] user 0x%08X logged out, closing pad handle %d in slot %d",
+                             slots[i].userId, slots[i].padHandle, i);
+                    inputDiagPrint(buf);
+                    scePadClose(slots[i].padHandle);
+                    slots[i].padHandle = -1;
+                    slots[i].userId = -1;
+                    slots[i].connected = false;
+                    slots[i].latestState = ControllerState();
+                }
+            }
+        }
+    }
 
     // --- Keyboard (IME) state ------------------------------------------------
     bool    keyboardActive = false;   ///< Whether IME keyboard reception is active.
@@ -385,17 +465,29 @@ InputResult InputManager::initialize() {
                            static_cast<uint32_t>(rc));
     }
 
-    // 4. Open the controller handle for the launching user.
-    m_impl->padHandle = scePadOpen(userId, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
-    if (m_impl->padHandle < 0) {
-        inputDiagPrint("[input] pad open failed");
-        return InputResult(InputResultCategory::PadOpenFailure,
-                           static_cast<uint32_t>(m_impl->padHandle));
+    // 4. Initialize slots and open the controller handle for the launching user in slot 0.
+    for (int i = 0; i < Impl::kSlotCount; ++i) {
+        m_impl->slots[i].userId = -1;
+        m_impl->slots[i].padHandle = -1;
+        m_impl->slots[i].connected = false;
+        m_impl->slots[i].latestState = ControllerState();
     }
+
+    m_impl->slots[0].userId = userId;
+    m_impl->slots[0].padHandle = scePadOpen(userId, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
+    if (m_impl->slots[0].padHandle < 0) {
+        inputDiagPrint("[input] primary pad open failed");
+        return InputResult(InputResultCategory::PadOpenFailure,
+                           static_cast<uint32_t>(m_impl->slots[0].padHandle));
+    }
+
+    // 4.5. Check for any additional already-logged-in users and open their pads.
+    m_impl->updatePadHandles();
 
     // 5. Initialize button state.
     m_impl->currentButtons = 0;
     m_impl->previousButtons = 0;
+    m_impl->pollCounter = 0;
 
     m_impl->initialized = true;
     inputDiagPrint("[input] initialization success");
@@ -415,13 +507,19 @@ void InputManager::shutdown() {
     stopKeyboard();
     stopMouse();
 
-    if (m_impl->padHandle >= 0) {
-        scePadClose(m_impl->padHandle);
-        m_impl->padHandle = -1;
+    for (int i = 0; i < Impl::kSlotCount; ++i) {
+        if (m_impl->slots[i].padHandle >= 0) {
+            scePadClose(m_impl->slots[i].padHandle);
+            m_impl->slots[i].padHandle = -1;
+        }
+        m_impl->slots[i].userId = -1;
+        m_impl->slots[i].connected = false;
+        m_impl->slots[i].latestState = ControllerState();
     }
 
     m_impl->currentButtons = 0;
     m_impl->previousButtons = 0;
+    m_impl->pollCounter = 0;
     m_impl->initialized = false;
 }
 
@@ -463,62 +561,102 @@ static int16_t convertAxis(uint8_t raw, bool invertY) {
 // ---------------------------------------------------------------------------
 
 void InputManager::poll() {
-    if (!m_impl->initialized || m_impl->padHandle < 0) {
+    if (!m_impl->initialized) {
         return;
     }
 
-    // Shift current to previous.
+    // Shift current to previous for UI edge detection.
     m_impl->previousButtons = m_impl->currentButtons;
 
-    // Read the latest controller state.
-    OrbisPadData padData;
-    memset(&padData, 0, sizeof(padData));
-
-    int32_t rc = scePadReadState(m_impl->padHandle, &padData);
-    if (rc != 0) {
-        // Read failed (e.g., controller temporarily disconnected).
-        // Zero the current state so no phantom button presses are reported.
-        m_impl->currentButtons = 0;
-        m_impl->latestState = ControllerState();  // neutral, disconnected
-        return;
+    // Periodically (every 60 frames, ~1s) scan for logged-in users / new controllers
+    m_impl->pollCounter++;
+    if ((m_impl->pollCounter % 60) == 0) {
+        m_impl->updatePadHandles();
     }
 
-    m_impl->currentButtons = padData.buttons;
+    uint32_t combinedButtons = 0;
 
-    // Build the full gameplay snapshot from the same successful read.
-    ControllerState& s = m_impl->latestState;
-    s.buttons = padData.buttons;
-    s.leftStickX  = convertAxis(padData.leftStick.x, false);
-    s.leftStickY  = convertAxis(padData.leftStick.y, true);
-    s.rightStickX = convertAxis(padData.rightStick.x, false);
-    s.rightStickY = convertAxis(padData.rightStick.y, true);
-    s.leftTrigger  = padData.analogButtons.l2;
-    s.rightTrigger = padData.analogButtons.r2;
-    s.connected = (padData.connected != 0);
+    for (int i = 0; i < Impl::kSlotCount; ++i) {
+        Impl::PadSlot& slot = m_impl->slots[i];
+        if (slot.padHandle < 0) {
+            continue;
+        }
 
-    // Touchpad state (first touch point). `fingers` is the number of active
-    // touch points; we track only the first for single-finger mouse movement.
-    s.touchActive = (padData.touch.fingers > 0);
-    s.touchFingers = padData.touch.fingers;
-    if (s.touchActive) {
-        s.touchX = static_cast<int16_t>(padData.touch.touch[0].x);
-        s.touchY = static_cast<int16_t>(padData.touch.touch[0].y);
-    } else {
-        s.touchX = 0;
-        s.touchY = 0;
+        OrbisPadData padData;
+        memset(&padData, 0, sizeof(padData));
+
+        int32_t rc = scePadReadState(slot.padHandle, &padData);
+        if (rc != 0) {
+            slot.connected = false;
+            slot.latestState = ControllerState();
+            continue;
+        }
+
+        slot.connected = (padData.connected != 0);
+        ControllerState& s = slot.latestState;
+        s.buttons = padData.buttons;
+        s.leftStickX  = convertAxis(padData.leftStick.x, false);
+        s.leftStickY  = convertAxis(padData.leftStick.y, true);
+        s.rightStickX = convertAxis(padData.rightStick.x, false);
+        s.rightStickY = convertAxis(padData.rightStick.y, true);
+        s.leftTrigger  = padData.analogButtons.l2;
+        s.rightTrigger = padData.analogButtons.r2;
+        s.connected = (padData.connected != 0);
+
+        s.touchActive = (padData.touch.fingers > 0);
+        s.touchFingers = padData.touch.fingers;
+        if (s.touchActive) {
+            s.touchX = static_cast<int16_t>(padData.touch.touch[0].x);
+            s.touchY = static_cast<int16_t>(padData.touch.touch[0].y);
+        } else {
+            s.touchX = 0;
+            s.touchY = 0;
+        }
+
+        if (slot.connected) {
+            combinedButtons |= padData.buttons;
+        }
     }
+
+    m_impl->currentButtons = combinedButtons;
 }
 
 // ---------------------------------------------------------------------------
-// Full controller snapshot accessor
+// Controller snapshot and connectivity accessors
 // ---------------------------------------------------------------------------
 
-bool InputManager::latestControllerState(ControllerState& out) const {
-    if (!m_impl || !m_impl->initialized) {
+bool InputManager::latestControllerState(ControllerState& out, int controllerIndex) const {
+    if (!m_impl || !m_impl->initialized || controllerIndex < 0 || controllerIndex >= Impl::kSlotCount) {
+        out = ControllerState();
         return false;
     }
-    out = m_impl->latestState;
+    const Impl::PadSlot& slot = m_impl->slots[controllerIndex];
+    if (slot.padHandle < 0 || !slot.connected) {
+        out = ControllerState();
+        return false;
+    }
+    out = slot.latestState;
     return true;
+}
+
+bool InputManager::isControllerConnected(int controllerIndex) const {
+    if (!m_impl || !m_impl->initialized || controllerIndex < 0 || controllerIndex >= Impl::kSlotCount) {
+        return false;
+    }
+    return m_impl->slots[controllerIndex].padHandle >= 0 && m_impl->slots[controllerIndex].connected;
+}
+
+int InputManager::connectedControllerCount() const {
+    if (!m_impl || !m_impl->initialized) {
+        return 0;
+    }
+    int count = 0;
+    for (int i = 0; i < Impl::kSlotCount; ++i) {
+        if (m_impl->slots[i].padHandle >= 0 && m_impl->slots[i].connected) {
+            count++;
+        }
+    }
+    return count;
 }
 
 // ---------------------------------------------------------------------------

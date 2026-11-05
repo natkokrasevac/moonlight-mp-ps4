@@ -13,7 +13,11 @@ SRC_DIR     := src
 BUILD_DIR   := _build
 PKG_DIR     := pkg_template
 
-PROJECT_NAME := $(shell basename $(CURDIR))
+ifeq ($(shell basename $(CURDIR)),workspace)
+    PROJECT_NAME := moonlight-dx-ps4
+else
+    PROJECT_NAME := $(shell basename $(CURDIR))
+endif
 
 # File naming
 PKG_NAME := $(PROJECT_NAME)_$(VERSION)
@@ -43,10 +47,12 @@ endif
 TOOLCHAIN_FILE := cmake/toolchain-ps4-$(CDIR).cmake
 TOOLS_DIR    := $(OO_PS4_TOOLCHAIN)/bin/$(CDIR)
 
-.PHONY: all clean ftp zip
+.PHONY: all clean ftp zip pkg
 
 # Default target: build the pkg only (no FTP upload)
 all: $(PKG_NAME).pkg
+
+pkg: $(PKG_NAME).pkg
 
 # Zip target: build the pkg if needed, then create a zip archive and checksum
 zip: $(PKG_NAME).pkg
@@ -60,7 +66,7 @@ ftp: $(PKG_NAME).pkg
 
 # Build the pkg. PkgTool.Core produces a file named by the CONTENT_ID from the
 # gp4; rename it to $(PKG_NAME).pkg.
-pkg $(PKG_NAME).pkg: pkg.gp4
+$(PKG_NAME).pkg: pkg.gp4
 	cd $(PKG_DIR) && $(TOOLS_DIR)/PkgTool.Core pkg_build pkg.gp4 ..
 	mv $(CONTENT_ID).pkg $(PKG_NAME).pkg
 

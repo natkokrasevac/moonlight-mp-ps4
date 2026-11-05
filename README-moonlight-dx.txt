@@ -1,8 +1,8 @@
-MOONLIGHT DX FOR PLAYSTATION 4
+MOONLIGHT MP FOR PLAYSTATION 4
 ==============================
 Version 2.00
 
-This is an unofficial Moonlight client for PlayStation 4. The DX stands for Deluxe :)
+This is an unofficial Moonlight client for PlayStation 4 with multi-controller support (MP).
 
 The most recent build can be found at 
 https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4
@@ -10,6 +10,7 @@ https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4
 Features
 ~~~~~~~~
 - All common Moonlight client features, incl. mDNS discovery
+- Multi-controller support (Player 1 + Player 2 up to 4 local controllers)
 - PS4 Pro support with HEVC and true 4K video pipeline
 - Fully GPU-accelerated (stream and UI) - console should stay cool(er)
 - Automatic bitrate recommendation (Moonlight convention)

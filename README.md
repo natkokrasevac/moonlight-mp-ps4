@@ -86,9 +86,11 @@ Linux (Debian shown, adapt for other distros):
 	this will install opengnm libraries in $OO_PS4_TOOLCHAIN/include/opengnm
 	you need to manually copy the libopengnm.a file to $OO_PS4_TOOLCHAIN/lib
 
-Windows:
+Windows (via Docker):
 
-- TBD
+- Run the included PowerShell build script:
+	`.\build-docker.ps1`
+	This builds the Docker builder container (with OpenOrbis v0.5.4 toolchain and OpenGNM) and generates the `.pkg` package directly.
 
 ### Obtaining the code
 

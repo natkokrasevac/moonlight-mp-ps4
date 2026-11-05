@@ -134,17 +134,44 @@ struct ControllerInputStreaming::Impl {
     uint32_t sessionGeneration = 0;   ///< Generation this module is forwarding for.
     bool inputReady = false;          ///< True once the target input channel is ready.
 
-    // --- Previous-state tracking --------------------------------------------
-    ps4::ControllerState previousState;
-    bool havePreviousState = false;
+    // --- Per-controller tracking --------------------------------------------
+    struct ControllerTrack {
+        ps4::ControllerState previousState;
+        bool havePreviousState = false;
+        uint32_t framesSinceRefresh = 0;
+        bool wasConnected = false;
+        bool arrivalSent = false;
+        bool firstPacketSent = false;
+        bool firstPacketLogged = false;
+    };
 
-    // --- Send policy --------------------------------------------------------
-    uint32_t framesSinceRefresh = 0;  ///< Frames since last periodic refresh.
-    bool firstPacketSent = false;     ///< Whether the first packet was sent.
+    static constexpr int kMaxControllers = ps4::InputManager::kMaxControllers;
+    ControllerTrack controllers[kMaxControllers];
+
+    uint16_t computeActiveGamepadMask() const {
+        uint16_t mask = 0;
+        for (int i = 0; i < kMaxControllers; ++i) {
+            if (controllers[i].wasConnected) {
+                mask |= static_cast<uint16_t>(1 << i);
+            }
+        }
+        return mask;
+    }
+
+    void resetControllers() {
+        for (int i = 0; i < kMaxControllers; ++i) {
+            controllers[i].previousState = ps4::ControllerState();
+            controllers[i].havePreviousState = false;
+            controllers[i].framesSinceRefresh = 0;
+            controllers[i].wasConnected = false;
+            controllers[i].arrivalSent = false;
+            controllers[i].firstPacketSent = false;
+            controllers[i].firstPacketLogged = false;
+        }
+    }
 
     // --- Diagnostics --------------------------------------------------------
     bool inputReadyLogged = false;
-    bool firstPacketLogged = false;
 
     // --- Keyboard/mouse state ------------------------------------------------
     // Tracks the currently-held mouse buttons so we can release them all on
@@ -264,30 +291,43 @@ struct ControllerInputStreaming::Impl {
     }
 
     // --- Helper: send a controller state to the host ------------------------
-    // Returns true if the send was accepted (or the input stream was not
-    // ready, which is treated as a non-fatal no-op).
-    bool sendState(const ps4::ControllerState& s) {
+    // Sends via LiSendMultiControllerEvent for the given controller slot.
+    bool sendMultiState(short controllerNumber,
+                        uint16_t activeGamepadMask,
+                        const ps4::ControllerState& s,
+                        bool mouseEmulationActive) {
         if (!inputReady) {
             return false;
         }
-        int flags = buildButtonFlags(s, mouseEmulationEnabled);
-        int rc = LiSendControllerEvent(flags,
-                                       s.leftTrigger,
-                                       s.rightTrigger,
-                                       s.leftStickX,
-                                       s.leftStickY,
-                                       s.rightStickX,
-                                       s.rightStickY);
+        int flags = buildButtonFlags(s, mouseEmulationActive);
+        int rc = LiSendMultiControllerEvent(controllerNumber,
+                                            activeGamepadMask,
+                                            flags,
+                                            s.leftTrigger,
+                                            s.rightTrigger,
+                                            s.leftStickX,
+                                            s.leftStickY,
+                                            s.rightStickX,
+                                            s.rightStickY);
         // rc == -2 means the input stream is not initialized (connection
         // teardown in progress). Treat as non-fatal; do not spam logs.
         return rc >= 0;
     }
 
-    // --- Helper: send a neutral state (release all buttons, center sticks) --
-    void sendNeutralState() {
+    // --- Helper: send a neutral state for a specific controller slot --------
+    void sendMultiNeutralState(short controllerNumber, uint16_t activeGamepadMask) {
         ps4::ControllerState neutral;
         neutral.connected = true;  // neutral is a valid connected state
-        sendState(neutral);
+        sendMultiState(controllerNumber, activeGamepadMask, neutral, false);
+    }
+
+    // --- Helper: send neutral states for all currently connected controllers -
+    void sendAllNeutralStates() {
+        for (int i = 0; i < kMaxControllers; ++i) {
+            if (controllers[i].wasConnected) {
+                sendMultiNeutralState(static_cast<short>(i), 0);
+            }
+        }
     }
 
     // --- Helper: convert a USB HID keycode to a Windows VK code ------------
@@ -594,11 +634,8 @@ void ControllerInputStreaming::shutdown() {
     m_impl->initialized = false;
     m_impl->sessionGeneration = 0;
     m_impl->inputReady = false;
-    m_impl->havePreviousState = false;
-    m_impl->framesSinceRefresh = 0;
-    m_impl->firstPacketSent = false;
     m_impl->inputReadyLogged = false;
-    m_impl->firstPacketLogged = false;
+    m_impl->resetControllers();
     m_impl->heldMouseButtons = 0;
     for (int i = 0; i < 256; ++i) {
         m_impl->heldKeys[i] = false;
@@ -624,11 +661,8 @@ void ControllerInputStreaming::start(uint32_t sessionGeneration,
     // Reset per-session state.
     m_impl->sessionGeneration = sessionGeneration;
     m_impl->inputReady = false;
-    m_impl->havePreviousState = false;
-    m_impl->framesSinceRefresh = 0;
-    m_impl->firstPacketSent = false;
     m_impl->inputReadyLogged = false;
-    m_impl->firstPacketLogged = false;
+    m_impl->resetControllers();
     m_impl->heldMouseButtons = 0;
     for (int i = 0; i < 256; ++i) {
         m_impl->heldKeys[i] = false;
@@ -661,11 +695,12 @@ void ControllerInputStreaming::stop() {
         return;
     }
 
-    // If the connection is still usable, send a neutral controller state and
-    // release all held keys/buttons on the host before we stop forwarding.
+    // If the connection is still usable, send neutral controller states for all
+    // connected controllers and release all held keys/buttons on the host before
+    // we stop forwarding.
     if (m_impl->state == ControllerInputStreamingState::Active &&
         m_impl->inputReady) {
-        m_impl->sendNeutralState();
+        m_impl->sendAllNeutralStates();
         m_impl->releaseAllInput();
     }
 
@@ -678,11 +713,8 @@ void ControllerInputStreaming::stop() {
     m_impl->state = ControllerInputStreamingState::Idle;
     m_impl->sessionGeneration = 0;
     m_impl->inputReady = false;
-    m_impl->havePreviousState = false;
-    m_impl->framesSinceRefresh = 0;
-    m_impl->firstPacketSent = false;
     m_impl->inputReadyLogged = false;
-    m_impl->firstPacketLogged = false;
+    m_impl->resetControllers();
     m_impl->heldMouseButtons = 0;
     for (int i = 0; i < 256; ++i) {
         m_impl->heldKeys[i] = false;
@@ -734,21 +766,17 @@ void ControllerInputStreaming::update() {
         }
     }
 
-    // --- Read the latest controller snapshot --------------------------------
-    ps4::ControllerState state;
-    if (!m_impl->inputManager ||
-        !m_impl->inputManager->latestControllerState(state)) {
-        return;
-    }
+    // --- Read controller 0 snapshot for chords / mouse emulation ------------
+    ps4::ControllerState state0;
+    bool state0Valid = m_impl->inputManager &&
+                       m_impl->inputManager->latestControllerState(state0, 0);
 
-    // --- Mouse-assist toggle chord (Options + TouchPad Click) ---------------
+    // --- Mouse-assist toggle chord (Options + TouchPad Click on Controller 1) -
     // Toggle controller-assisted mouse emulation on the rising edge of the
-    // chord. The chord buttons are consumed in buildButtonFlags so they are
-    // not forwarded to the host. When toggling OFF, release any held emulated
-    // mouse buttons so no mouse button is left stuck on the host.
-    {
+    // chord. Pinned strictly to Controller 1 so player 2 cannot inadvertently toggle.
+    if (state0Valid) {
         const bool chordHeld =
-            (state.buttons & kRawOptions) && (state.buttons & kRawTouchpad);
+            (state0.buttons & kRawOptions) && (state0.buttons & kRawTouchpad);
         if (chordHeld && !m_impl->prevMouseAssistChordHeld) {
             m_impl->mouseEmulationEnabled = !m_impl->mouseEmulationEnabled;
             if (!m_impl->mouseEmulationEnabled) {
@@ -763,55 +791,89 @@ void ControllerInputStreaming::update() {
         m_impl->prevMouseAssistChordHeld = chordHeld;
     }
 
-    // --- Disconnect / reconnect handling ------------------------------------
-    if (m_impl->havePreviousState &&
-        state.connected != m_impl->previousState.connected) {
-        if (!state.connected) {
-            // Disconnected: send neutral, stop forwarding until reconnect.
-            m_impl->sendNeutralState();
-            m_impl->havePreviousState = false;
-            m_impl->framesSinceRefresh = 0;
-            cisDiagPrint("[input] controller disconnected — neutral sent");
-            return;
+    // --- Process all controller slots (Player 1 + Player 2 up to 4) ---------
+    for (int i = 0; i < Impl::kMaxControllers; ++i) {
+        Impl::ControllerTrack& track = m_impl->controllers[i];
+        ps4::ControllerState state;
+        bool isConnected = m_impl->inputManager &&
+                           m_impl->inputManager->latestControllerState(state, i) &&
+                           state.connected;
+
+        // Disconnect detection
+        if (track.wasConnected && !isConnected) {
+            track.wasConnected = false;
+            track.havePreviousState = false;
+            track.arrivalSent = false;
+            track.framesSinceRefresh = 0;
+            uint16_t newMask = m_impl->computeActiveGamepadMask();
+            m_impl->sendMultiNeutralState(static_cast<short>(i), newMask);
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[input] controller %d disconnected — neutral sent", i);
+            cisDiagPrint(buf);
+            continue;
         }
-        // Reconnected: send full current state, resume normal updates.
-        m_impl->havePreviousState = false;
-        cisDiagPrint("[input] controller reconnected");
-    }
 
-    // --- First packet / change detection ------------------------------------
-    bool changed = !m_impl->havePreviousState;
-    if (m_impl->havePreviousState) {
-        const ps4::ControllerState& p = m_impl->previousState;
-        changed = (state.buttons != p.buttons) ||
-                  (state.leftStickX != p.leftStickX) ||
-                  (state.leftStickY != p.leftStickY) ||
-                  (state.rightStickX != p.rightStickX) ||
-                  (state.rightStickY != p.rightStickY) ||
-                  (state.leftTrigger != p.leftTrigger) ||
-                  (state.rightTrigger != p.rightTrigger);
-    }
-
-    // --- Periodic refresh ---------------------------------------------------
-    bool refresh = false;
-    if (m_impl->havePreviousState) {
-        ++m_impl->framesSinceRefresh;
-        if (m_impl->framesSinceRefresh >= kRefreshIntervalFrames) {
-            m_impl->framesSinceRefresh = 0;
-            refresh = true;
+        if (!isConnected) {
+            continue;
         }
-    }
 
-    if (changed || refresh) {
-        m_impl->sendState(state);
-        m_impl->previousState = state;
-        m_impl->havePreviousState = true;
+        // New connection / Arrival detection
+        bool isNewConnection = !track.wasConnected;
+        if (isNewConnection) {
+            track.wasConnected = true;
+            uint16_t mask = m_impl->computeActiveGamepadMask();
+            if (!track.arrivalSent) {
+                LiSendControllerArrivalEvent(static_cast<uint8_t>(i),
+                                             mask,
+                                             LI_CTYPE_PS,
+                                             0xFFFFFFFF,
+                                             LI_CCAP_ANALOG_TRIGGERS);
+                track.arrivalSent = true;
+            }
+            char buf[96];
+            snprintf(buf, sizeof(buf), "[input] controller %d connected/arrived (mask=0x%04X)", i, mask);
+            cisDiagPrint(buf);
+        }
 
-        if (!m_impl->firstPacketSent) {
-            m_impl->firstPacketSent = true;
-            if (!m_impl->firstPacketLogged) {
-                m_impl->firstPacketLogged = true;
-                cisDiagPrint("[input] first controller packet sent");
+        uint16_t currentMask = m_impl->computeActiveGamepadMask();
+        bool mouseEmulationActive = (i == 0) && m_impl->mouseEmulationEnabled;
+
+        // Change detection
+        bool changed = !track.havePreviousState || isNewConnection;
+        if (track.havePreviousState) {
+            const ps4::ControllerState& p = track.previousState;
+            changed = (state.buttons != p.buttons) ||
+                      (state.leftStickX != p.leftStickX) ||
+                      (state.leftStickY != p.leftStickY) ||
+                      (state.rightStickX != p.rightStickX) ||
+                      (state.rightStickY != p.rightStickY) ||
+                      (state.leftTrigger != p.leftTrigger) ||
+                      (state.rightTrigger != p.rightTrigger);
+        }
+
+        // Periodic refresh
+        bool refresh = false;
+        if (track.havePreviousState) {
+            ++track.framesSinceRefresh;
+            if (track.framesSinceRefresh >= kRefreshIntervalFrames) {
+                track.framesSinceRefresh = 0;
+                refresh = true;
+            }
+        }
+
+        if (changed || refresh) {
+            m_impl->sendMultiState(static_cast<short>(i), currentMask, state, mouseEmulationActive);
+            track.previousState = state;
+            track.havePreviousState = true;
+
+            if (!track.firstPacketSent) {
+                track.firstPacketSent = true;
+                if (!track.firstPacketLogged) {
+                    track.firstPacketLogged = true;
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "[input] first packet sent for controller %d", i);
+                    cisDiagPrint(buf);
+                }
             }
         }
     }
@@ -843,8 +905,8 @@ void ControllerInputStreaming::update() {
     // mouse buttons (not forwarded as controller A/B by buildButtonFlags).
     // Touchpad click remains reserved for the Back/Start mapping and is NOT
     // used for mouse emulation.
-    if (m_impl->mouseEmulationEnabled && m_impl->inputReady) {
-        m_impl->processMouseEmulation(state);
+    if (m_impl->mouseEmulationEnabled && m_impl->inputReady && state0Valid) {
+        m_impl->processMouseEmulation(state0);
     }
 }
 

@@ -173,11 +173,22 @@ public:
     /// Returns true once initialize() has succeeded and before shutdown().
     bool isInitialized() const;
 
-    /// Poll the controller once. Must be called once per application frame.
+    /// Maximum number of local controllers supported (PS4 supports up to 4 users).
+    static constexpr int kMaxControllers = 4;
+
+    /// Poll all active controllers once. Must be called once per application frame.
     void poll();
 
-    /// Returns the most recent full controller snapshot (gameplay/raw state).
-    bool latestControllerState(ControllerState& out) const;
+    /// Returns the most recent full controller snapshot (gameplay/raw state)
+    /// for the specified controller index (0 = primary/launching user, up to kMaxControllers - 1).
+    /// Defaults to index 0 for backward compatibility.
+    bool latestControllerState(ControllerState& out, int controllerIndex = 0) const;
+
+    /// Returns true if a controller is actively connected at the specified slot index.
+    bool isControllerConnected(int controllerIndex) const;
+
+    /// Returns the number of currently connected controllers.
+    int connectedControllerCount() const;
 
     // --- Keyboard (PS4 IME keyboard API) ------------------------------------
 
