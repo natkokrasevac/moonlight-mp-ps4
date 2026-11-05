@@ -731,10 +731,11 @@ AppResult MoonlightApp::initialize() {
     }
     diagPrint("[app] ControllerInputStreaming initialized");
 
-    // 11.9. Wire the VideoDecoder into the StreamSessionManager.
+    // 11.9. Wire the VideoDecoder and InputManager into the StreamSessionManager.
     //       The stream manager forwards video callbacks (setup/start/stop/
-    //       cleanup/submitDecodeUnit) to the decoder.
+    //       cleanup/submitDecodeUnit) to the decoder, and rumble / LED to InputManager.
     m_streamSessionManager->setVideoDecoder(m_videoDecoder.get());
+    m_streamSessionManager->setInputManager(m_input.get());
 
     // 12. Initialize the HostManager (authoritative host registry).
     diagPrint("[app] HostManager initialized");

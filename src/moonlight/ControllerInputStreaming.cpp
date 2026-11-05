@@ -827,7 +827,7 @@ void ControllerInputStreaming::update() {
                                              mask,
                                              LI_CTYPE_PS,
                                              0xFFFFFFFF,
-                                             LI_CCAP_ANALOG_TRIGGERS);
+                                             LI_CCAP_ANALOG_TRIGGERS | LI_CCAP_RUMBLE | LI_CCAP_RGB_LED);
                 track.arrivalSent = true;
             }
             char buf[96];

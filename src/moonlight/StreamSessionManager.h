@@ -44,6 +44,10 @@
 #include "ApplicationCatalog.h"  // ml::ApplicationId
 #include "ApplicationSessionManager.h"  // ml::StreamSessionDescriptor
 
+namespace ps4 {
+class InputManager;
+}
+
 namespace ml {
 
 // Forward declaration.
@@ -280,6 +284,10 @@ public:
     /// Must be called before start(). The decoder must outlive the active
     /// stream session.
     void setVideoDecoder(VideoDecoder* decoder);
+
+    /// Set the InputManager that receives vibration and light bar callbacks.
+    /// `inputManager` is a non-owning pointer.
+    void setInputManager(ps4::InputManager* inputManager);
 
     /// Stop the worker, join it, clear session material and queues, and
     /// release resources. Must be called before NetworkManager shutdown.

@@ -190,6 +190,23 @@ public:
     /// Returns the number of currently connected controllers.
     int connectedControllerCount() const;
 
+    // --- Vibration (Rumble) and Light Bar -----------------------------------
+
+    /// Set vibration / rumble for a controller slot (0 to kMaxControllers - 1).
+    /// `lowFreqMotor` and `highFreqMotor` are in the 0..65535 range (Moonlight / XInput convention).
+    void setVibration(int controllerIndex, uint16_t lowFreqMotor, uint16_t highFreqMotor);
+
+    /// Set RGB light bar color for a controller slot (0 to kMaxControllers - 1).
+    /// If `overrideColor` is true, sets a custom RGB color from the host game.
+    /// If `overrideColor` is false, resets to the default slot color (P1: Blue, P2: Red, etc.).
+    void setLightBar(int controllerIndex, uint8_t r, uint8_t g, uint8_t b, bool overrideColor = true);
+
+    /// Reset all controller light bars to their default player slot colors.
+    void resetLightBars();
+
+    /// Stop vibration on all connected controllers immediately.
+    void stopAllVibration();
+
     // --- Keyboard (PS4 IME keyboard API) ------------------------------------
 
     /// Start keyboard reception for the launching user. Loads the LIBIME and

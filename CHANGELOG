@@ -4,6 +4,9 @@ V2.10 - 2026-11-05
 	Multi-user session discovery via sceUserServiceGetLoginUserIdList
 	Per-controller light bar coloring (P1: Blue, P2: Red, P3: Green, P4: Magenta)
 	Independent streaming controller routing with LiSendMultiControllerEvent
+	DualShock 4 dual-motor rumble / force feedback (scePadSetVibration)
+	Dynamic in-game RGB light bar color control (scePadSetLightBar)
+	Advertised rumble and RGB LED capabilities in arrival events
 	Restricted mouse emulation touchpad to Controller 1
 	Stream-exit chord (Options + L3) supported across any active controller
 	Added reproducible Docker build container

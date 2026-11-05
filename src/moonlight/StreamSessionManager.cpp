@@ -42,6 +42,7 @@
 
 #include "StreamSessionManager.h"
 #include "VideoDecoder.h"
+#include "platform/ps4/InputManager.h"
 
 // --- moonlight-common-c (C) header — confined to this translation unit --------
 #include "Limelight.h"
@@ -144,6 +145,10 @@ struct StreamSessionManager::Impl {
     // Set via setVideoDecoder() before start(). The decoder must outlive the
     // active stream session. Video callbacks forward to it.
     VideoDecoder* videoDecoder = nullptr;
+
+    // --- InputManager dependency (non-owning) -------------------------------
+    // Set via setInputManager() before start(). Receives rumble and LED callbacks.
+    ps4::InputManager* inputManager = nullptr;
 
     // --- Connection event queue ---------------------------------------------
     pthread_mutex_t eventMutex;
@@ -254,6 +259,10 @@ void ssmClConnectionTerminated(int errorCode) {
     // Signal the lifecycle worker to tear down the connection.
     StreamSessionManager::Impl* owner = ssmGetActiveOwner();
     if (owner != nullptr) {
+        if (owner->inputManager) {
+            owner->inputManager->stopAllVibration();
+            owner->inputManager->resetLightBars();
+        }
         owner->terminationRequested = true;
         owner->terminationErrorCode = errorCode;
         pthread_mutex_lock(&owner->wakeMutex);
@@ -275,7 +284,11 @@ void ssmClLogMessage(const char* format, ...) {
 
 void ssmClRumble(unsigned short controllerNumber, unsigned short lowFreqMotor,
                  unsigned short highFreqMotor) {
-    (void)controllerNumber; (void)lowFreqMotor; (void)highFreqMotor;
+    StreamSessionManager::Impl* owner = ssmGetActiveOwner();
+    if (owner && owner->inputManager) {
+        owner->inputManager->setVibration(static_cast<int>(controllerNumber),
+                                          lowFreqMotor, highFreqMotor);
+    }
 }
 
 void ssmClConnectionStatusUpdate(int connectionStatus) {
@@ -302,7 +315,12 @@ void ssmClSetMotionEventState(uint16_t controllerNumber, uint8_t motionType,
 }
 
 void ssmClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b) {
-    (void)controllerNumber; (void)r; (void)g; (void)b;
+    StreamSessionManager::Impl* owner = ssmGetActiveOwner();
+    if (owner && owner->inputManager) {
+        bool isReset = (r == 0 && g == 0 && b == 0);
+        owner->inputManager->setLightBar(static_cast<int>(controllerNumber),
+                                         r, g, b, !isReset);
+    }
 }
 
 void ssmClSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags,
@@ -1059,6 +1077,11 @@ void StreamSessionManager::stop() {
         return;
     }
 
+    if (m_impl->inputManager) {
+        m_impl->inputManager->stopAllVibration();
+        m_impl->inputManager->resetLightBars();
+    }
+
     StreamSessionState cur = m_impl->state.load();
     if (cur == StreamSessionState::Idle || cur == StreamSessionState::Failed) {
         return;
@@ -1245,6 +1268,12 @@ void StreamSessionManager::setVideoDecoder(VideoDecoder* decoder) {
     }
 }
 
+void StreamSessionManager::setInputManager(ps4::InputManager* inputManager) {
+    if (m_impl) {
+        m_impl->inputManager = inputManager;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
@@ -1252,6 +1281,11 @@ void StreamSessionManager::setVideoDecoder(VideoDecoder* decoder) {
 void StreamSessionManager::shutdown() {
     if (!m_impl) {
         return;
+    }
+
+    if (m_impl->inputManager) {
+        m_impl->inputManager->stopAllVibration();
+        m_impl->inputManager->resetLightBars();
     }
 
     // Signal stop.

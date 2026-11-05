@@ -46,6 +46,7 @@
 #include <cstdio>                // printf, fflush, snprintf
 #include <cstring>               // memset
 #include <cstdint>               // INT16_MIN, INT16_MAX
+#include <mutex>
 
 // ---------------------------------------------------------------------------
 // Local OpenOrbis SDK type/constant definitions
@@ -227,10 +228,15 @@ struct InputManager::Impl {
         int32_t padHandle = -1;
         bool    connected = false;
         ControllerState latestState;
+        bool    hasLedOverride = false;
+        uint8_t ledR = 0;
+        uint8_t ledG = 0;
+        uint8_t ledB = 0;
     };
 
     static constexpr int kSlotCount = InputManager::kMaxControllers;
     PadSlot slots[kSlotCount];
+    std::mutex padMutex;
     uint32_t pollCounter = 0;
     bool    initialized = false;
 
@@ -252,6 +258,8 @@ struct InputManager::Impl {
         if (rc != 0) {
             return;
         }
+
+        std::lock_guard<std::mutex> lock(padMutex);
 
         // Populate or maintain slots 1..kSlotCount-1 for secondary users
         for (int u = 0; u < 4; ++u) {
@@ -524,10 +532,14 @@ void InputManager::shutdown() {
         return;
     }
 
+    stopAllVibration();
+    resetLightBars();
+
     // Stop keyboard and mouse reception first (release their resources).
     stopKeyboard();
     stopMouse();
 
+    std::lock_guard<std::mutex> lock(m_impl->padMutex);
     for (int i = 0; i < Impl::kSlotCount; ++i) {
         if (m_impl->slots[i].padHandle >= 0) {
             scePadClose(m_impl->slots[i].padHandle);
@@ -616,7 +628,21 @@ void InputManager::poll() {
         bool wasConnected = slot.connected;
         slot.connected = (padData.connected != 0);
         if (!wasConnected && slot.connected) {
-            setSlotLightBar(slot.padHandle, i);
+            if (slot.hasLedOverride) {
+                OrbisPadColor color;
+                color.r = slot.ledR;
+                color.g = slot.ledG;
+                color.b = slot.ledB;
+                color.a = 255;
+                scePadSetLightBar(slot.padHandle, &color);
+            } else {
+                setSlotLightBar(slot.padHandle, i);
+            }
+        } else if (wasConnected && !slot.connected) {
+            OrbisPadVibeParam vibe;
+            vibe.lgMotor = 0;
+            vibe.smMotor = 0;
+            scePadSetVibration(slot.padHandle, &vibe);
         }
         ControllerState& s = slot.latestState;
         s.buttons = padData.buttons;
@@ -682,6 +708,75 @@ int InputManager::connectedControllerCount() const {
         }
     }
     return count;
+}
+
+// ---------------------------------------------------------------------------
+// Vibration (Rumble) and Light Bar
+// ---------------------------------------------------------------------------
+
+void InputManager::setVibration(int controllerIndex, uint16_t lowFreqMotor, uint16_t highFreqMotor) {
+    if (!m_impl || controllerIndex < 0 || controllerIndex >= Impl::kSlotCount) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_impl->padMutex);
+    int32_t handle = m_impl->slots[controllerIndex].padHandle;
+    if (handle < 0 || !m_impl->slots[controllerIndex].connected) {
+        return;
+    }
+    OrbisPadVibeParam vibe;
+    vibe.lgMotor = static_cast<uint8_t>(lowFreqMotor >> 8);
+    vibe.smMotor = static_cast<uint8_t>(highFreqMotor >> 8);
+    scePadSetVibration(handle, &vibe);
+}
+
+void InputManager::setLightBar(int controllerIndex, uint8_t r, uint8_t g, uint8_t b, bool overrideColor) {
+    if (!m_impl || controllerIndex < 0 || controllerIndex >= Impl::kSlotCount) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_impl->padMutex);
+    int32_t handle = m_impl->slots[controllerIndex].padHandle;
+    if (handle < 0) {
+        return;
+    }
+    if (overrideColor) {
+        m_impl->slots[controllerIndex].hasLedOverride = true;
+        m_impl->slots[controllerIndex].ledR = r;
+        m_impl->slots[controllerIndex].ledG = g;
+        m_impl->slots[controllerIndex].ledB = b;
+        OrbisPadColor color;
+        color.r = r;
+        color.g = g;
+        color.b = b;
+        color.a = 255;
+        scePadSetLightBar(handle, &color);
+    } else {
+        m_impl->slots[controllerIndex].hasLedOverride = false;
+        setSlotLightBar(handle, controllerIndex);
+    }
+}
+
+void InputManager::resetLightBars() {
+    if (!m_impl) return;
+    std::lock_guard<std::mutex> lock(m_impl->padMutex);
+    for (int i = 0; i < Impl::kSlotCount; ++i) {
+        m_impl->slots[i].hasLedOverride = false;
+        if (m_impl->slots[i].padHandle >= 0) {
+            setSlotLightBar(m_impl->slots[i].padHandle, i);
+        }
+    }
+}
+
+void InputManager::stopAllVibration() {
+    if (!m_impl) return;
+    std::lock_guard<std::mutex> lock(m_impl->padMutex);
+    OrbisPadVibeParam vibe;
+    vibe.lgMotor = 0;
+    vibe.smMotor = 0;
+    for (int i = 0; i < Impl::kSlotCount; ++i) {
+        if (m_impl->slots[i].padHandle >= 0) {
+            scePadSetVibration(m_impl->slots[i].padHandle, &vibe);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

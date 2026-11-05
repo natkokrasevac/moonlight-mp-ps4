@@ -11,6 +11,8 @@ Features
 ~~~~~~~~
 - All common Moonlight client features, incl. mDNS discovery
 - Multi-controller support (Player 1 + Player 2 up to 4 local controllers)
+- DualShock 4 dual-motor rumble / vibration support (independent per controller)
+- Dynamic in-game RGB light bar color control
 - PS4 Pro support with HEVC and true 4K video pipeline
 - Fully GPU-accelerated (stream and UI) - console should stay cool(er)
 - Automatic bitrate recommendation (Moonlight convention)

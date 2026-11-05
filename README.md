@@ -4,6 +4,8 @@ This is an unofficial Moonlight client for PlayStation 4 with multi-controller /
 
 Features:
 - Multi-controller support: Connect multiple DualShock 4 controllers (Player 1, Player 2, etc.) to play multiplayer games on host PC.
+- DualShock 4 force feedback (dual-motor rumble) with independent per-controller vibration.
+- Dynamic in-game RGB light bar color control.
 - PS4 Pro support with HEVC and true 4K video pipeline.
 - Hardware-accelerated decoding and rendering.
 - Mouse emulation on Player 1 touchpad and keyboard/mouse pass-through.
