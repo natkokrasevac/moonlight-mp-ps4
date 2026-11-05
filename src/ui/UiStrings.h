@@ -155,7 +155,7 @@ constexpr const char* kAppName = "Moonlight MP for PlayStation 4";
 /// Version label (Settings footer). Used by the Settings panel footer.
 constexpr const char* kVersionLabel = "fourletterworkshop.com";
 /// Version number (Settings footer). Used by the Settings panel footer.
-constexpr const char* kVersionNumber = "2.1";
+constexpr const char* kVersionNumber = "2.2";
 
 // --- Stream statistics row labels ------------------------------------------
 /// Resolution (statistics row label). Used by the StreamStatistics overlay.
