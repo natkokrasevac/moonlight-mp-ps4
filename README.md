@@ -1,8 +1,12 @@
-# Moonlight DX client for PlayStation 4
+# Moonlight MP client for PlayStation 4
 
-This is an unofficial Moonlight client for PlayStation 4. The DX stands for Deluxe :)
+This is an unofficial Moonlight client for PlayStation 4 with multi-controller / multiplayer support (Moonlight MP).
 
-The most recent build can be found [here](https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4)
+Features:
+- Multi-controller support: Connect multiple DualShock 4 controllers (Player 1, Player 2, etc.) to play multiplayer games on host PC.
+- PS4 Pro support with HEVC and true 4K video pipeline.
+- Hardware-accelerated decoding and rendering.
+- Mouse emulation on Player 1 touchpad and keyboard/mouse pass-through.
 
 ## Building from Source
 

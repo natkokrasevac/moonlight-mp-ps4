@@ -14,7 +14,7 @@ BUILD_DIR   := _build
 PKG_DIR     := pkg_template
 
 ifeq ($(shell basename $(CURDIR)),workspace)
-    PROJECT_NAME := moonlight-dx-ps4
+    PROJECT_NAME := moonlight-mp-ps4
 else
     PROJECT_NAME := $(shell basename $(CURDIR))
 endif

@@ -195,6 +195,24 @@ static void inputDiagPrint(const char* msg) {
     fflush(stdout);
 }
 
+// --- Helper: set DualShock 4 light bar color by player slot ----------------
+static void setSlotLightBar(int32_t handle, int slotIndex) {
+    if (handle < 0) {
+        return;
+    }
+    OrbisPadColor color;
+    memset(&color, 0, sizeof(color));
+    switch (slotIndex) {
+        case 0: color.b = 255; break;                  // Blue (Player 1)
+        case 1: color.r = 255; break;                  // Red (Player 2)
+        case 2: color.g = 255; break;                  // Green (Player 3)
+        case 3: color.r = 255; color.b = 255; break;   // Magenta (Player 4)
+        default: color.b = 255; break;
+    }
+    scePadSetLightBar(handle, &color);
+}
+
+
 // ---------------------------------------------------------------------------
 // Private implementation state
 // ---------------------------------------------------------------------------
@@ -263,6 +281,7 @@ struct InputManager::Impl {
                         slots[i].padHandle = handle;
                         slots[i].connected = false;
                         slots[i].latestState = ControllerState();
+                        setSlotLightBar(handle, i);
                         char buf[128];
                         snprintf(buf, sizeof(buf),
                                  "[input] opened pad handle %d for user 0x%08X in slot %d",
@@ -388,6 +407,7 @@ void imeKeyboardHandler(void* arg, const SceImeEvent* e) {
     ++impl->keyboardQueueCount;
 }
 
+
 // ---------------------------------------------------------------------------
 // Construction / Destruction
 // ---------------------------------------------------------------------------
@@ -480,6 +500,7 @@ InputResult InputManager::initialize() {
         return InputResult(InputResultCategory::PadOpenFailure,
                            static_cast<uint32_t>(m_impl->slots[0].padHandle));
     }
+    setSlotLightBar(m_impl->slots[0].padHandle, 0);
 
     // 4.5. Check for any additional already-logged-in users and open their pads.
     m_impl->updatePadHandles();
@@ -592,7 +613,11 @@ void InputManager::poll() {
             continue;
         }
 
+        bool wasConnected = slot.connected;
         slot.connected = (padData.connected != 0);
+        if (!wasConnected && slot.connected) {
+            setSlotLightBar(slot.padHandle, i);
+        }
         ControllerState& s = slot.latestState;
         s.buttons = padData.buttons;
         s.leftStickX  = convertAxis(padData.leftStick.x, false);

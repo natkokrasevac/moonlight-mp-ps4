@@ -1,3 +1,13 @@
+V2.10 - 2026-11-05
+	Rebranded to Moonlight MP (multi-controller / multiplayer support)
+	Added multi-controller support (simultaneous 2+ DualShock 4 controllers)
+	Multi-user session discovery via sceUserServiceGetLoginUserIdList
+	Per-controller light bar coloring (P1: Blue, P2: Red, P3: Green, P4: Magenta)
+	Independent streaming controller routing with LiSendMultiControllerEvent
+	Restricted mouse emulation touchpad to Controller 1
+	Stream-exit chord (Options + L3) supported across any active controller
+	Added reproducible Docker build container
+
 V2.00 - 2026-09-12
 	Full PS4 Pro Support
 	HEVC and 4K streams implemented
