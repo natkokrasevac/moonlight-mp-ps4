@@ -14,5 +14,6 @@ if (-not $img) {
 }
 
 # Run make inside Docker container
-Write-Host "Compiling Moonlight DX PS4 inside Docker..."
+Write-Host "Compiling Moonlight MP PS4 inside Docker..."
 docker run --rm -v "${PWD}:/workspace" -w /workspace $ImageName make all
+
