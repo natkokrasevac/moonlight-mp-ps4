@@ -8,14 +8,20 @@
 
 ## Features
 
-- **Multi-Controller Support**: Connect up to 4 DualShock 4 controllers simultaneously for local multiplayer / co-op streaming. Secondary controllers are detected automatically as users or guests log in.
-- **Dual-Motor Force Feedback (Rumble)**: Independent vibration feedback (`largeMotor` and `smallMotor`) routed to each controller.
-- **Dynamic In-Game Light Bar Colors**: Real-time game-driven RGB light bar illumination, reverting cleanly to player slot indicators (P1: **Blue**, P2: **Red**, P3: **Green**, P4: **Magenta**).
-- **PS4 Pro 4K & HEVC Support**: Hardware-accelerated H.265/HEVC decoding and true 4K streaming pipeline on PS4 Pro.
-- **GPU Accelerated**: Fully GPU-accelerated video rendering and UI compositing for cool and quiet operation.
-- **Touchpad Mouse Emulation**: Touchpad on Player 1 emulates mouse pointer navigation.
-- **Hardware Mouse & Keyboard**: Direct pass-through support for USB/Bluetooth keyboards and mice.
-- **Universal Stream Exit**: Press `Options + L3` on any connected controller to exit back to the menu.
+### 🌟 New in Moonlight MP
+- **Multi-Controller & Local Co-Op (MP)**: Connect up to 4 DualShock 4 controllers simultaneously for local multiplayer gaming. Secondary controllers are detected dynamically as users or guest accounts sign in (`sceUserServiceGetLoginUserIdList`).
+- **Dual-Motor Force Feedback (Rumble)**: Hardware dual-motor vibration (`largeMotor` heavy rumble and `smallMotor` light rumble via `scePadSetVibration`) routed independently to each player slot.
+- **Dynamic In-Game RGB Light Bar Colors**: Real-time game-driven light bar illumination (`clSetControllerLED`), reverting cleanly to player slot colors (P1: **Blue**, P2: **Red**, P3: **Green**, P4: **Magenta**) in menus or on disconnect.
+- **Universal Stream Exit**: Press `Options + L3` on any connected controller to gracefully exit the stream back to the UI.
+- **Reproducible Docker Build**: Cross-compile the PS4 `.pkg` on Windows, Linux, or macOS with a single command (`.\build-docker.ps1`) without installing toolchains locally.
+
+### 🛡️ Inherited from Moonlight DX
+- **PS4 Pro 4K & HEVC Support**: Hardware-accelerated H.265/HEVC decoding with a true 4K streaming pipeline on PS4 Pro.
+- **Full GPU Acceleration**: Hardware video decoding and GPU-accelerated UI rendering/compositing for low latency and cool console operation.
+- **Touchpad Mouse Emulation**: Touchpad on Controller 1 emulates mouse cursor navigation and clicks.
+- **Hardware Keyboard & Mouse**: Direct pass-through support for USB/Bluetooth keyboards and mice.
+- **PlayStation-Inspired UI**: Clean native interface with choice between classic Grid and PlayStation CrossBar views.
+- **mDNS Auto-Discovery**: Automatic discovery and pairing with local Sunshine and GeForce Experience hosts.
 
 ---
 
