@@ -296,6 +296,11 @@ constexpr int32_t kDmemProt = ORBIS_KERNEL_PROT_CPU_RW | ORBIS_KERNEL_PROT_GPU_A
 /// at depth > 1.
 constexpr uint32_t kDecodePipelineDepth = 4;
 
+/// Maximum consecutive P-frames discarded while in WaitingForIdr before
+/// attempting decode anyway (prevents permanent black screen when streaming
+/// from hosts that do not support on-demand IDR generation, e.g. PS5 Avcap2).
+constexpr uint32_t kMaxWaitingIdrDrops = 30;
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -437,6 +442,7 @@ struct VideoDecoder::Impl {
     // --- Session state ------------------------------------------------------
     // True until the first IDR of the current session has been decoded.
     std::atomic<bool> awaitingFirstIdr{true};
+    uint32_t waitingIdrDropCount = 0;
 
     // --- Native RTP timestamp normalization state ---------------------------
     bool haveTimestampBase = false;
@@ -1052,25 +1058,14 @@ void* VideoDecoder::decoderWorker(void* arg) {
             continue;
         }
 
-        // --- First-IDR reset ------------------------------------------------
-        // On the first IDR of a new session, reset the decoder to a clean
-        // state and request a fresh IDR from the host.
+        // --- First-IDR tracking ---------------------------------------------
         if (impl->awaitingFirstIdr.load() &&
             unit.frameType == 1 /* FRAME_TYPE_IDR */) {
-            if (impl->decoder && impl->api.Reset) {
-                impl->api.Reset(impl->decoder);
-            }
-            // Reset aborts in-flight frame-parallel processing. The decoder
-            // no longer references any input AUs after a successful reset,
-            // so the retained set can be cleared safely.
-            impl->clearRetainedAus();
             impl->awaitingFirstIdr.store(false);
-            LiRequestIdrFrame();
-            impl->idrRequests.fetch_add(1);
             if (!impl->firstIdrLogged.exchange(true)) {
                 char buf[128];
                 snprintf(buf, sizeof(buf),
-                         "[video] first IDR submitted (frame=%llu)",
+                         "[video] first IDR received (frame=%llu)",
                          static_cast<unsigned long long>(unit.frameNumber));
                 vdDiagPrint(buf);
             }
@@ -1078,18 +1073,29 @@ void* VideoDecoder::decoderWorker(void* arg) {
 
         // --- WaitingForIdr handling -----------------------------------------
         if (impl->state.load() == VideoDecoderState::WaitingForIdr) {
-            if (unit.frameType != 1 /* FRAME_TYPE_IDR */) {
-                // Discard P-frame while waiting for IDR.
-                impl->encodedConsumed.fetch_add(1);
-                continue;
-            }
-            // This is an IDR frame — submit it to recover.
-            impl->state = VideoDecoderState::Running;
-            {
-                VideoDecoderUpdate update;
-                update.type = VideoDecoderUpdateType::Recovered;
-                update.result = VideoDecoderResultCategory::Success;
-                impl->pushUpdate(update);
+            if (unit.frameType == 1 /* FRAME_TYPE_IDR */) {
+                // This is an IDR frame — submit it to recover.
+                impl->state = VideoDecoderState::Running;
+                impl->waitingIdrDropCount = 0;
+                {
+                    VideoDecoderUpdate update;
+                    update.type = VideoDecoderUpdateType::Recovered;
+                    update.result = VideoDecoderResultCategory::Success;
+                    impl->pushUpdate(update);
+                }
+            } else {
+                impl->waitingIdrDropCount++;
+                if (impl->waitingIdrDropCount >= kMaxWaitingIdrDrops) {
+                    // Host may not support on-demand IDRs (e.g. PS5 Avcap2).
+                    // Fall back to attempting decode rather than permanently staying black.
+                    vdDiagPrint("[video] WaitingForIdr timeout; attempting decode on incoming frames");
+                    impl->state = VideoDecoderState::Running;
+                    impl->waitingIdrDropCount = 0;
+                } else {
+                    // Discard P-frame while waiting for IDR.
+                    impl->encodedConsumed.fetch_add(1);
+                    continue;
+                }
             }
         }
 
@@ -1143,6 +1149,21 @@ void* VideoDecoder::decoderWorker(void* arg) {
         // The submitting call counts as call 1 for the AU's lifetime.
         const uint64_t submitSeq = ++impl->decodeCallSeq;
         int32_t rc = impl->api.Decode(impl->decoder, &inputData, &frameBuffer, &outputInfo);
+
+        // Sequence change: per Sony Videodec2 SDK specification, when Decode()
+        // returns ORBIS_VIDEODEC2_ERROR_NEW_SEQUENCE, the sequence headers
+        // (SPS/PPS) have been processed by the decoder core. Reset the decoder
+        // and immediately re-submit the same access unit so its picture data is
+        // decoded without discarding the keyframe or demanding another IDR.
+        if (static_cast<uint32_t>(rc) == ORBIS_VIDEODEC2_ERROR_NEW_SEQUENCE) {
+            vdDiagPrint("[video] NEW_SEQUENCE detected; resetting decoder and re-submitting AU");
+            if (impl->api.Reset) {
+                impl->api.Reset(impl->decoder);
+            }
+            impl->clearRetainedAus();
+            rc = impl->api.Decode(impl->decoder, &inputData, &frameBuffer, &outputInfo);
+        }
+
         const uint64_t elapsedUs = static_cast<uint64_t>(sceKernelGetProcessTime()) - tDecode;
         impl->statsDecodeTotalUs.fetch_add(elapsedUs, std::memory_order_relaxed);
         impl->statsDecodeCount.fetch_add(1, std::memory_order_relaxed);
@@ -1217,9 +1238,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
                 vdDiagPrint(buf);
             }
 
-            // Sequence change: reset the decoder and request a fresh IDR. The
-            // AU that triggered the change is discarded (the SDK sample resets
-            // then re-submits; we rely on the IDR request to recover).
+            // Sequence change that still failed after re-submission: reset and request IDR.
             if (static_cast<uint32_t>(rc) == ORBIS_VIDEODEC2_ERROR_NEW_SEQUENCE) {
                 if (impl->api.Reset) {
                     impl->api.Reset(impl->decoder);
@@ -1228,6 +1247,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
                 // decoder no longer references any input AUs.
                 impl->clearRetainedAus();
                 impl->state = VideoDecoderState::WaitingForIdr;
+                impl->waitingIdrDropCount = 0;
                 LiRequestIdrFrame();
                 impl->idrRequests.fetch_add(1);
                 continue;
@@ -1237,6 +1257,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
             // (Return codes are negative; treat any failure as recoverable
             // by requesting an IDR, except fatal state which stops.)
             impl->state = VideoDecoderState::WaitingForIdr;
+            impl->waitingIdrDropCount = 0;
             LiRequestIdrFrame();
             impl->idrRequests.fetch_add(1);
             continue;
@@ -1379,6 +1400,7 @@ VideoDecoderResult VideoDecoder::initialize() {
     m_impl->statsDecodedFrames = 0;
     m_impl->statsDecodeTotalUs = 0;
     m_impl->statsDecodeCount = 0;
+    m_impl->waitingIdrDropCount = 0;
 
     // Clear retained AUs and reset the decode-call sequence.
     m_impl->retainedAus.clear();
@@ -1620,6 +1642,7 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     m_impl->statsDecodedFrames = 0;
     m_impl->statsDecodeTotalUs = 0;
     m_impl->statsDecodeCount = 0;
+    m_impl->waitingIdrDropCount = 0;
 
     // Clear retained AUs and reset the decode-call sequence.
     m_impl->retainedAus.clear();
