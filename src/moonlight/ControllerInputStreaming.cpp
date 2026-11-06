@@ -40,6 +40,8 @@
 #include "platform/ps4/InputManager.h"   // ps4::InputManager, ps4::ControllerState, ps4::KeyboardEvent, ps4::MouseEvent, ps4::KeyAction
 #include "StreamSessionManager.h"        // ml::StreamSessionManager, ml::StreamSessionState
 
+#include <orbis/libkernel.h>             // sceKernelGetProcessTime
+
 // --- moonlight-common-c (C) header — confined to this translation unit --------
 #include "Limelight.h"                   // LiSendControllerEvent, LiSendKeyboardEvent2, LiSendMouseMoveEvent, LiSendMouseButtonEvent, LiSendHighResScrollEvent, LiSendHighResHScrollEvent, button flags
 
@@ -93,6 +95,8 @@ constexpr uint32_t kRawTouchpad = 0x00100000u; // ORBIS_PAD_BUTTON_TOUCH_PAD
 constexpr uint32_t kRawOptions  = 0x00000008u; // ORBIS_PAD_BUTTON_OPTIONS
 constexpr uint32_t kRawL3       = 0x00000002u; // ORBIS_PAD_BUTTON_L3
 constexpr uint32_t kRawR3       = 0x00000004u; // ORBIS_PAD_BUTTON_R3
+constexpr uint32_t kRawL1       = 0x00000400u; // ORBIS_PAD_BUTTON_L1
+constexpr uint32_t kRawR1       = 0x00000800u; // ORBIS_PAD_BUTTON_R1
 
 // PS4 raw button bits used by mouse emulation (ORBIS_PAD_BUTTON_*).
 constexpr uint32_t kRawCross  = 0x00004000u; // ORBIS_PAD_BUTTON_CROSS
@@ -134,6 +138,13 @@ struct ControllerInputStreaming::Impl {
     uint32_t sessionGeneration = 0;   ///< Generation this module is forwarding for.
     bool inputReady = false;          ///< True once the target input channel is ready.
 
+    // --- Guide chord state tracking (L1 + R1 + Options -> PS/Guide pulse) ---
+    struct GuideChordState {
+        enum class Phase { Idle, Neutral, Pulse, Drain };
+        Phase phase = Phase::Idle;
+        uint64_t releaseUs = 0;
+    };
+
     // --- Per-controller tracking --------------------------------------------
     struct ControllerTrack {
         ps4::ControllerState previousState;
@@ -143,6 +154,7 @@ struct ControllerInputStreaming::Impl {
         bool arrivalSent = false;
         bool firstPacketSent = false;
         bool firstPacketLogged = false;
+        GuideChordState guideChord;
     };
 
     static constexpr int kMaxControllers = ps4::InputManager::kMaxControllers;
@@ -167,6 +179,7 @@ struct ControllerInputStreaming::Impl {
             controllers[i].arrivalSent = false;
             controllers[i].firstPacketSent = false;
             controllers[i].firstPacketLogged = false;
+            controllers[i].guideChord = GuideChordState{};
         }
     }
 
@@ -206,15 +219,15 @@ struct ControllerInputStreaming::Impl {
     // the host-visible state automatically.
     //
     // Precedence:
-    //   1. Options + L3  → local stream exit (handled by MoonlightApp).
-    //      Suppress Options and L3 from the host.
-    //   2. Options + TouchPad Click → local mouse-assist toggle (handled in
-    //      update()). Suppress Options and the touchpad-click Back/Start.
-    //   3. Single touch + Touchpad Click → Back/Select (left half) or Start
-    //      (right half), unless consumed by the mouse-assist chord.
-    //   4. Options → PS/Home/Guide (SPECIAL_FLAG), unless consumed by the
-    //      exit chord or the mouse-assist chord.
-    //   5. Otherwise      → normal standalone button mapping.
+    //   1. Options + L3             → local stream exit (handled by MoonlightApp).
+    //                                 Suppress Options and L3 from the host.
+    //   2. Options + TouchPad Click → local mouse-assist toggle (handled in update()).
+    //                                 Suppress Options and the touchpad click.
+    //   3. L1 + R1 + Options        → Guide chord filter (sends 80ms PS/Guide pulse;
+    //                                 suppresses L1, R1, and Options until all released).
+    //   4. Options                  → Host Options/Start (PLAY_FLAG).
+    //   5. Touchpad Click           → Host Touchpad / Back / Select (BACK_FLAG).
+    //   6. Otherwise                → normal standalone button mapping.
     //
     // When `mouseEmulationActive` is true, Cross and Circle are consumed as
     // mouse buttons (emitted by processMouseEmulation) and are NOT forwarded
@@ -223,12 +236,15 @@ struct ControllerInputStreaming::Impl {
     // Only the chord's own components are consumed; unrelated
     // concurrently-held buttons continue to pass through normally.
     static int buildButtonFlags(const ps4::ControllerState& s,
-                                bool mouseEmulationActive) {
+                                bool mouseEmulationActive,
+                                GuideChordState& guide) {
         const uint32_t b = s.buttons;
 
         const bool touchpadPressed = (b & kRawTouchpad) != 0;
         const bool optionsPressed  = (b & kRawOptions) != 0;
         const bool l3Pressed       = (b & kRawL3) != 0;
+        const bool l1Pressed       = (b & kRawL1) != 0;
+        const bool r1Pressed       = (b & kRawR1) != 0;
 
         // Exit chord (highest priority): Options + L3.
         const bool exitChord = optionsPressed && l3Pressed;
@@ -248,33 +264,18 @@ struct ControllerInputStreaming::Impl {
         if (b & 0x00000040u) flags |= kFlagDown;       // ORBIS_PAD_BUTTON_DOWN
         if (b & 0x00000080u) flags |= kFlagLeft;       // ORBIS_PAD_BUTTON_LEFT
         if (b & 0x00000020u) flags |= kFlagRight;      // ORBIS_PAD_BUTTON_RIGHT
-        if (b & 0x00000400u) flags |= kFlagL1;         // ORBIS_PAD_BUTTON_L1 → LB
-        if (b & 0x00000800u) flags |= kFlagR1;         // ORBIS_PAD_BUTTON_R1 → RB
-        // NOTE: L2/R2 are analog triggers. Their analog values (0..255) are
-        // transmitted via the leftTrigger/rightTrigger parameters of
-        // LiSendControllerEvent, which the host interprets as LT/RT. The
-        // digital L2/R2 button bits are intentionally NOT mapped to LB/RB;
-        // the analog trigger path is authoritative for LT/RT.
-        // NOTE: Options is intentionally NOT mapped to Start. Start is instead
-        // produced by a single touch on the right half of the touchpad +
-        // touchpad click (below). Options maps to PS/Home/Guide (SPECIAL_FLAG),
-        // unless consumed by the exit chord or the mouse-assist chord.
+
+        if (l1Pressed) flags |= kFlagL1;               // ORBIS_PAD_BUTTON_L1 → LB
+        if (r1Pressed) flags |= kFlagR1;               // ORBIS_PAD_BUTTON_R1 → RB
+
+        // Options maps directly to Host Options / Start (PLAY_FLAG).
         if (optionsPressed && !exitChord && !mouseAssistChord) {
-            flags |= kFlagSpecial;    // ORBIS_PAD_BUTTON_OPTIONS → PS/Home/Guide
+            flags |= kFlagOptions;
         }
 
-        // Single touch + touchpad click → Back/Select or Start. A single touch
-        // on the left half of the touchpad maps to Back/Select; a single touch
-        // on the right half maps to Start. A touchpad click with no touch, or
-        // with multiple touches, produces nothing. Consumed by the
-        // mouse-assist chord.
-        const bool singleTouch = s.touchActive && s.touchFingers == 1;
-        if (touchpadPressed && singleTouch && !mouseAssistChord) {
-            if (s.touchX < kTouchpadXMidpoint) {
-                flags |= kFlagBack;      // left half → Back/Select
-            } else {
-                flags |= kFlagOptions;   // right half → Start
-            }
+        // Touchpad click maps to Host Touchpad / Back / Select (BACK_FLAG).
+        if (touchpadPressed && !mouseAssistChord) {
+            flags |= kFlagBack;
         }
 
         // L3, unless consumed by the exit chord.
@@ -282,9 +283,45 @@ struct ControllerInputStreaming::Impl {
             flags |= kFlagL3;
         }
 
-        // R3 passes through normally (no longer consumed by the exit chord).
+        // R3 passes through normally.
         if (b & kRawR3) {
             flags |= kFlagR3;
+        }
+
+        // Guide Chord Filter: L1 + R1 + Options -> PS / Guide button (SPECIAL_FLAG)
+        // Sends an 80 ms Guide pulse, and suppresses L1, R1, and Options until
+        // all three chord buttons are fully released.
+        const int kChordMask = kFlagL1 | kFlagR1 | kFlagOptions;
+        const bool chordHeld = (flags & kChordMask) == kChordMask;
+        const uint64_t now = static_cast<uint64_t>(sceKernelGetProcessTime());
+
+        switch (guide.phase) {
+        case GuideChordState::Phase::Idle:
+            if (chordHeld && !touchpadPressed && !exitChord && !mouseAssistChord) {
+                // Release previously forwarded buttons before pressing Guide.
+                guide.phase = GuideChordState::Phase::Neutral;
+                return flags & ~kChordMask;
+            }
+            break;
+
+        case GuideChordState::Phase::Neutral:
+            guide.phase = GuideChordState::Phase::Pulse;
+            guide.releaseUs = now + 80000; // 80 ms pulse
+            return (flags & ~kChordMask) | kFlagSpecial;
+
+        case GuideChordState::Phase::Pulse:
+            if (now < guide.releaseUs) {
+                return (flags & ~kChordMask) | kFlagSpecial;
+            }
+            guide.phase = GuideChordState::Phase::Drain;
+            return flags & ~kChordMask;
+
+        case GuideChordState::Phase::Drain:
+        default:
+            if (!l1Pressed && !r1Pressed && !optionsPressed) {
+                guide.phase = GuideChordState::Phase::Idle;
+            }
+            return flags & ~kChordMask;
         }
 
         return flags;
@@ -299,7 +336,8 @@ struct ControllerInputStreaming::Impl {
         if (!inputReady) {
             return false;
         }
-        int flags = buildButtonFlags(s, mouseEmulationActive);
+        int flags = buildButtonFlags(s, mouseEmulationActive,
+                                     controllers[controllerNumber].guideChord);
         int rc = LiSendMultiControllerEvent(controllerNumber,
                                             activeGamepadMask,
                                             flags,

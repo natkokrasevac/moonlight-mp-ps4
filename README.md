@@ -105,8 +105,11 @@ make
 | **Select / Enter** | ✕ Cross (or ○ Circle based on console setting) |
 | **Back / Cancel** | ○ Circle (or ✕ Cross based on console setting) |
 | **Toggle Hostname / IP** | ▢ Square (in Add Host modal) |
+| **Game Pause / Options** | Options |
+| **Host PS / Guide Button** | `L1 + R1 + Options` |
+| **Host Touchpad / View / Select** | Touchpad Click |
 | **Exit Stream** | `Options + L3` (any controller) |
-| **Toggle Mouse Mode** | Touchpad Click (Player 1) |
+| **Toggle Mouse Mode** | `Options + Touchpad Click` (Player 1) |
 
 ---
 

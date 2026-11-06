@@ -1,4 +1,7 @@
 V2.50 - 2026-11-06
+	Native Options button mapping: physical Options sends Host Options (Start)
+	Host PS / Guide button mapped to clean L1 + R1 + Options chord with pulse filter
+	Touchpad click mapped directly to Host Touchpad / View / Select button
 	Centered Settings overlay into a TV overscan-safe modal dialog
 	Support hostname/DDNS manual host entry with smart port parsing
 	Fix black screen on stream startup with hosts lacking on-demand IDR
