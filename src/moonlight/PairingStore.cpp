@@ -103,7 +103,7 @@ constexpr uint16_t kMaxServerIdLen = 256;
 constexpr uint32_t kMaxPeerCertDerLen = 16384;
 constexpr uint16_t kMaxFqdnLen = 256;
 constexpr uint16_t kMaxHostnameLen = 256;
-constexpr uint16_t kMaxIpv4Len = 64;   ///< Dotted IPv4 string bound.
+constexpr uint16_t kMaxIpv4Len = 256;   ///< Endpoint address / hostname string bound.
 
 /// Maximum identity file size (bounded).
 constexpr size_t kMaxIdentityFileSize = 32 * 1024;

@@ -235,10 +235,11 @@ struct AddHostRenderState {
     AddHostPresentationState state = AddHostPresentationState::None;
 
     // --- Form overlay fields (state == Form) -------------------------------
-    std::string ipText;            ///< IP Address field text.
+    bool isHostnameMode = false;   ///< false = IP Address mode, true = Hostname mode.
+    std::string ipText;            ///< IP Address / Hostname field text.
     std::string portText;          ///< Port field text.
     std::string validationError;   ///< Inline validation error (empty = none).
-    int selectedField = 0;         ///< 0=IP, 1=Port, 2=Cancel, 3=Add.
+    int selectedField = 0;         ///< 0=Type, 1=Address, 2=Port, 3=Cancel, 4=Add.
     bool imeActive = false;        ///< PS4 ImeDialog is open for a field.
 
     // --- Status modal fields (state == Checking/Found/Failed) --------------
@@ -600,7 +601,7 @@ public:
     bool requestAddHostIme();
 
     /// Query the details of the pending Add Host ImeDialog request.
-    bool getAddHostImeRequest(bool& isPort, std::string& initialText) const;
+    bool getAddHostImeRequest(bool& isPort, bool& isHostname, std::string& initialText) const;
 
     /// Provide the text returned by the PS4 ImeDialog back to the Add Host
     /// overlay.

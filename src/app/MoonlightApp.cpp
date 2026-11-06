@@ -6266,6 +6266,11 @@ int MoonlightApp::addHostDirtyRects(const ui::AddHostRenderState& prev,
         if (prev.portText != cur.portText) {
             addRect(m_addHostRenderer->portRowBounds());
         }
+        // Mode toggle change (IP Address <-> Hostname).
+        if (prev.isHostnameMode != cur.isHostnameMode) {
+            addRect(m_addHostRenderer->typeRowBounds());
+            addRect(m_addHostRenderer->ipRowBounds());
+        }
         // Validation error change.
         if (prev.validationError != cur.validationError) {
             addRect(m_addHostRenderer->validationBounds());
@@ -6274,17 +6279,19 @@ int MoonlightApp::addHostDirtyRects(const ui::AddHostRenderState& prev,
         // the previous highlight is cleared and the new one is drawn.
         if (prev.selectedField != cur.selectedField) {
             switch (prev.selectedField) {
-            case 0: addRect(m_addHostRenderer->ipRowBounds()); break;
-            case 1: addRect(m_addHostRenderer->portRowBounds()); break;
-            case 2:
-            case 3: addRect(m_addHostRenderer->buttonsBounds()); break;
+            case 0: addRect(m_addHostRenderer->typeRowBounds()); break;
+            case 1: addRect(m_addHostRenderer->ipRowBounds()); break;
+            case 2: addRect(m_addHostRenderer->portRowBounds()); break;
+            case 3:
+            case 4: addRect(m_addHostRenderer->buttonsBounds()); break;
             default: break;
             }
             switch (cur.selectedField) {
-            case 0: addRect(m_addHostRenderer->ipRowBounds()); break;
-            case 1: addRect(m_addHostRenderer->portRowBounds()); break;
-            case 2:
-            case 3: addRect(m_addHostRenderer->buttonsBounds()); break;
+            case 0: addRect(m_addHostRenderer->typeRowBounds()); break;
+            case 1: addRect(m_addHostRenderer->ipRowBounds()); break;
+            case 2: addRect(m_addHostRenderer->portRowBounds()); break;
+            case 3:
+            case 4: addRect(m_addHostRenderer->buttonsBounds()); break;
             default: break;
             }
         }
@@ -6628,25 +6635,42 @@ bool MoonlightApp::openAddHostIme() {
 
     // Query which field is being edited and its current value.
     bool isPort = false;
+    bool isHostname = false;
     std::string initialText;
-    if (!m_ui->getAddHostImeRequest(isPort, initialText)) {
+    if (!m_ui->getAddHostImeRequest(isPort, isHostname, initialText)) {
         return false;
     }
 
-    // Both the IP and Port fields use the numeric OSK (ORBIS_TYPE_NUMBER),
-    // which presents digits plus a period (and backspace/clear/enter). The
-    // IP field needs the dot for IPv4; the port field is purely numeric.
-    // Both are validated client-side after return.
-    const bool numericOnly = true;
-    const uint32_t maxLength = isPort ? 5 : 15;   // 5 digits for port, 15 for IPv4.
+    // Port and numeric IP fields use the numeric OSK (ORBIS_TYPE_NUMBER).
+    // Hostname uses the full alphanumeric OSK (ORBIS_TYPE_BASIC_LATIN)
+    // so letters, numbers, hyphens, and periods can be typed.
+    bool numericOnly = true;
+    uint32_t maxLength = 15;
+    const char* title = "IP Address";
+
+    if (isPort) {
+        numericOnly = true;
+        maxLength = 5;
+        title = "Port";
+    } else if (isHostname) {
+        numericOnly = false;
+        maxLength = 253;
+        title = "Hostname";
+    } else {
+        numericOnly = true;
+        maxLength = 15;
+        title = "IP Address";
+    }
+
     diagPrint(isPort ? "[app] opening ImeDialog for Port field"
-                     : "[app] opening ImeDialog for IP field");
+                     : (isHostname ? "[app] opening ImeDialog for Hostname field"
+                                   : "[app] opening ImeDialog for IP field"));
 
     // Pass the system's Enter Button Assignment so the OSK confirm/back
     // mapping follows the user's setting (Cross=accept → Western OSK,
     // Circle=accept → Japanese OSK).
     const bool crossIsAccept = m_input && m_input->isCrossAccept();
-    bool opened = m_imeDialog->open(initialText, isPort ? "Port" : "IP Address",
+    bool opened = m_imeDialog->open(initialText, title,
                                     maxLength, numericOnly, crossIsAccept);
     diagPrint(opened ? "[app] ImeDialog opened"
                      : "[app] ImeDialog open FAILED");
@@ -6715,10 +6739,14 @@ void MoonlightApp::handleAddHost(const std::string& ipv4, uint16_t port) {
         for (const auto& h : m_hostManager->hosts()) {
             const uint16_t hPort = (h.port != 0) ? h.port : 47989;
             if (hPort == reqPort) {
-                for (const auto& addr : h.ipv4Addresses) {
-                    if (addr == ipv4) {
-                        wasExisting = true;
-                        break;
+                if (!h.hostname.empty() && h.hostname == ipv4) {
+                    wasExisting = true;
+                } else {
+                    for (const auto& addr : h.ipv4Addresses) {
+                        if (addr == ipv4) {
+                            wasExisting = true;
+                            break;
+                        }
                     }
                 }
             }

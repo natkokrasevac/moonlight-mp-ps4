@@ -126,13 +126,61 @@ static bool isValidPort(const std::string& text, uint16_t& outPort) {
     return true;
 }
 
-/// Validate the Add Host form.
-static bool validateAddHost(const std::string& ipText,
-                            const std::string& portText,
-                            std::string& error) {
-    if (!isValidIpv4(ipText)) {
-        error = "Invalid IPv4 address";
+/// Validate a hostname (RFC 1123 / standard FQDN or hostname label).
+/// Also returns true if the text is a valid numeric IPv4.
+static bool isValidHostname(const std::string& text) {
+    if (text.empty() || text.size() > 253) {
         return false;
+    }
+    if (isValidIpv4(text)) {
+        return true;
+    }
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find('.', start);
+        if (end == std::string::npos) {
+            end = text.size();
+        }
+        size_t len = end - start;
+        if (len == 0 || len > 63) {
+            return false;
+        }
+        if (text[start] == '-' || text[end - 1] == '-') {
+            return false;
+        }
+        for (size_t i = start; i < end; ++i) {
+            char c = text[i];
+            if (!((c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') ||
+                  c == '-')) {
+                return false;
+            }
+        }
+        start = end + 1;
+    }
+    return true;
+}
+
+/// Validate the Add Host form.
+static bool validateAddHost(const std::string& addressText,
+                            const std::string& portText,
+                            bool isHostnameMode,
+                            std::string& error) {
+    if (addressText.empty()) {
+        error = isHostnameMode ? "Hostname cannot be empty" : "IP address cannot be empty";
+        return false;
+    }
+    if (isHostnameMode) {
+        if (!isValidHostname(addressText)) {
+            error = "Invalid hostname";
+            return false;
+        }
+    } else {
+        if (!isValidIpv4(addressText)) {
+            error = "Invalid IPv4 address";
+            return false;
+        }
     }
     uint16_t port = 0;
     if (!isValidPort(portText, port)) {
@@ -251,13 +299,15 @@ struct UiManager::Impl {
 
     // --- Add Host overlay state ---------------------------------------------
     enum class AddHostField : uint8_t {
-        IpAddress,
+        EntryType,
+        Address,
         Port,
         Cancel,
         Add
     };
     bool        addHostOpen = false;
-    AddHostField addHostSelected = AddHostField::IpAddress;
+    bool        addHostIsHostname = false;
+    AddHostField addHostSelected = AddHostField::Address;
     std::string addHostIpText;
     std::string addHostPortText;
     std::string addHostValidationError;
@@ -358,8 +408,9 @@ UiResult UiManager::initialize() {
     m_impl->pendingIntent = UiIntent();
     m_impl->pendingSoundIntent = UiSoundIntent::None;
     m_impl->addHostOpen = false;
+    m_impl->addHostIsHostname = false;
     m_impl->addHostImeActive = false;
-    m_impl->addHostSelected = Impl::AddHostField::IpAddress;
+    m_impl->addHostSelected = Impl::AddHostField::Address;
     m_impl->addHostIpText.clear();
     m_impl->addHostPortText.clear();
     m_impl->addHostValidationError.clear();
@@ -401,8 +452,9 @@ void UiManager::shutdown() {
     m_impl->pendingIntent = UiIntent();
     m_impl->pendingSoundIntent = UiSoundIntent::None;
     m_impl->addHostOpen = false;
+    m_impl->addHostIsHostname = false;
     m_impl->addHostImeActive = false;
-    m_impl->addHostSelected = Impl::AddHostField::IpAddress;
+    m_impl->addHostSelected = Impl::AddHostField::Address;
     m_impl->addHostIpText.clear();
     m_impl->addHostPortText.clear();
     m_impl->addHostValidationError.clear();
@@ -1235,16 +1287,18 @@ bool UiManager::buildAddHostRenderState(AddHostRenderState& out) const {
 
     if (m_impl->addHostOpen) {
         state.state = AddHostPresentationState::Form;
+        state.isHostnameMode = m_impl->addHostIsHostname;
         state.ipText = m_impl->addHostIpText;
         state.portText = m_impl->addHostPortText;
         state.validationError = m_impl->addHostValidationError;
         state.imeActive = m_impl->addHostImeActive;
         switch (m_impl->addHostSelected) {
-        case Impl::AddHostField::IpAddress: state.selectedField = 0; break;
-        case Impl::AddHostField::Port:      state.selectedField = 1; break;
-        case Impl::AddHostField::Cancel:    state.selectedField = 2; break;
-        case Impl::AddHostField::Add:       state.selectedField = 3; break;
-        default:                            state.selectedField = 0; break;
+        case Impl::AddHostField::EntryType: state.selectedField = 0; break;
+        case Impl::AddHostField::Address:   state.selectedField = 1; break;
+        case Impl::AddHostField::Port:      state.selectedField = 2; break;
+        case Impl::AddHostField::Cancel:    state.selectedField = 3; break;
+        case Impl::AddHostField::Add:       state.selectedField = 4; break;
+        default:                            state.selectedField = 1; break;
         }
         out = std::move(state);
         return true;
@@ -1301,8 +1355,8 @@ bool UiManager::requestAddHostIme() {
     if (!m_impl || !m_impl->addHostOpen || m_impl->addHostImeActive) {
         return false;
     }
-    // Only editable fields (IP Address / Port) open the ImeDialog.
-    if (m_impl->addHostSelected != Impl::AddHostField::IpAddress &&
+    // Only editable fields (Address / Port) open the ImeDialog.
+    if (m_impl->addHostSelected != Impl::AddHostField::Address &&
         m_impl->addHostSelected != Impl::AddHostField::Port) {
         return false;
     }
@@ -1310,15 +1364,17 @@ bool UiManager::requestAddHostIme() {
     return true;
 }
 
-bool UiManager::getAddHostImeRequest(bool& isPort, std::string& initialText) const {
+bool UiManager::getAddHostImeRequest(bool& isPort, bool& isHostname, std::string& initialText) const {
     if (!m_impl || !m_impl->addHostOpen || !m_impl->addHostImeActive) {
         return false;
     }
     if (m_impl->addHostSelected == Impl::AddHostField::Port) {
         isPort = true;
+        isHostname = false;
         initialText = m_impl->addHostPortText;
     } else {
         isPort = false;
+        isHostname = m_impl->addHostIsHostname;
         initialText = m_impl->addHostIpText;
     }
     return true;
@@ -1336,8 +1392,27 @@ void UiManager::setAddHostImeResult(bool accepted, const std::string& text) {
     }
 
     // Apply the returned text to the field that was being edited.
-    if (m_impl->addHostSelected == Impl::AddHostField::IpAddress) {
-        m_impl->addHostIpText = text;
+    if (m_impl->addHostSelected == Impl::AddHostField::Address) {
+        std::string cleanedText = text;
+        const size_t colonPos = text.rfind(':');
+        if (colonPos != std::string::npos && colonPos + 1 < text.size()) {
+            const std::string possiblePort = text.substr(colonPos + 1);
+            bool allDigits = true;
+            for (char c : possiblePort) {
+                if (c < '0' || c > '9') {
+                    allDigits = false;
+                    break;
+                }
+            }
+            if (allDigits && !possiblePort.empty()) {
+                unsigned long p = std::strtoul(possiblePort.c_str(), nullptr, 10);
+                if (p >= 1 && p <= 65535) {
+                    m_impl->addHostPortText = possiblePort;
+                    cleanedText = text.substr(0, colonPos);
+                }
+            }
+        }
+        m_impl->addHostIpText = cleanedText;
     } else if (m_impl->addHostSelected == Impl::AddHostField::Port) {
         m_impl->addHostPortText = text;
     }
@@ -1509,27 +1584,37 @@ void UiManager::processInput(const UiInput& input) {
 
         const Impl::AddHostField prevField = m_impl->addHostSelected;
         if (input.upPressed) {
-            if (m_impl->addHostSelected == Impl::AddHostField::Port) {
-                m_impl->addHostSelected = Impl::AddHostField::IpAddress;
+            if (m_impl->addHostSelected == Impl::AddHostField::Address) {
+                m_impl->addHostSelected = Impl::AddHostField::EntryType;
+            } else if (m_impl->addHostSelected == Impl::AddHostField::Port) {
+                m_impl->addHostSelected = Impl::AddHostField::Address;
             } else if (m_impl->addHostSelected == Impl::AddHostField::Cancel ||
                        m_impl->addHostSelected == Impl::AddHostField::Add) {
                 m_impl->addHostSelected = Impl::AddHostField::Port;
             }
         }
         if (input.downPressed) {
-            if (m_impl->addHostSelected == Impl::AddHostField::IpAddress) {
+            if (m_impl->addHostSelected == Impl::AddHostField::EntryType) {
+                m_impl->addHostSelected = Impl::AddHostField::Address;
+            } else if (m_impl->addHostSelected == Impl::AddHostField::Address) {
                 m_impl->addHostSelected = Impl::AddHostField::Port;
             } else if (m_impl->addHostSelected == Impl::AddHostField::Port) {
                 m_impl->addHostSelected = Impl::AddHostField::Cancel;
             }
         }
         if (input.leftPressed) {
-            if (m_impl->addHostSelected == Impl::AddHostField::Add) {
+            if (m_impl->addHostSelected == Impl::AddHostField::EntryType) {
+                m_impl->addHostIsHostname = !m_impl->addHostIsHostname;
+                m_impl->addHostValidationError.clear();
+            } else if (m_impl->addHostSelected == Impl::AddHostField::Add) {
                 m_impl->addHostSelected = Impl::AddHostField::Cancel;
             }
         }
         if (input.rightPressed) {
-            if (m_impl->addHostSelected == Impl::AddHostField::Cancel) {
+            if (m_impl->addHostSelected == Impl::AddHostField::EntryType) {
+                m_impl->addHostIsHostname = !m_impl->addHostIsHostname;
+                m_impl->addHostValidationError.clear();
+            } else if (m_impl->addHostSelected == Impl::AddHostField::Cancel) {
                 m_impl->addHostSelected = Impl::AddHostField::Add;
             }
         }
@@ -1539,7 +1624,12 @@ void UiManager::processInput(const UiInput& input) {
 
         if (input.acceptPressed) {
             switch (m_impl->addHostSelected) {
-            case Impl::AddHostField::IpAddress:
+            case Impl::AddHostField::EntryType:
+                m_impl->addHostIsHostname = !m_impl->addHostIsHostname;
+                m_impl->addHostValidationError.clear();
+                m_impl->pendingSoundIntent = UiSoundIntent::Cursor;
+                break;
+            case Impl::AddHostField::Address:
             case Impl::AddHostField::Port:
                 m_impl->addHostImeActive = true;
                 break;
@@ -1552,6 +1642,7 @@ void UiManager::processInput(const UiInput& input) {
             case Impl::AddHostField::Add:
                 if (validateAddHost(m_impl->addHostIpText,
                                     m_impl->addHostPortText,
+                                    m_impl->addHostIsHostname,
                                     m_impl->addHostValidationError)) {
                     UiIntent intent(UiIntentType::RequestAddHost);
                     intent.ipv4 = m_impl->addHostIpText;
@@ -1837,7 +1928,7 @@ void UiManager::processInput(const UiInput& input) {
         if (input.squarePressed) {
             m_impl->addHostOpen = true;
             m_impl->addHostImeActive = false;
-            m_impl->addHostSelected = Impl::AddHostField::IpAddress;
+            m_impl->addHostSelected = Impl::AddHostField::Address;
             m_impl->addHostValidationError.clear();
             // Prepopulate the IP field with the console's own address so
             // entering a host on the same network is easier. Only set it when

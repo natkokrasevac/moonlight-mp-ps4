@@ -960,15 +960,19 @@ StreamSessionResult StreamSessionManager::start(StreamSessionDescriptor&& sessio
         return StreamSessionResult(StreamSessionResultCategory::InvalidSession);
     }
 
-    // Validate numeric IPv4.
+    // Validate target address: must be numeric IPv4 or a valid hostname.
+    // LiStartConnection() performs full DNS name resolution during STAGE_NAME_RESOLUTION.
     OrbisNetInAddr addr;
     if (sceNetInetPton(ORBIS_NET_AF_INET, session.ipv4Address.c_str(), &addr) != 1) {
-        char buf[128];
-        snprintf(buf, sizeof(buf),
-                 "[stream] start rejected: invalid numeric IPv4 '%s'",
-                 session.ipv4Address.c_str());
-        ssmDiagPrint(buf);
-        return StreamSessionResult(StreamSessionResultCategory::InvalidSession);
+        if (session.ipv4Address.find(' ') != std::string::npos ||
+            session.ipv4Address.size() > 253) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "[stream] start rejected: invalid target address '%s'",
+                     session.ipv4Address.c_str());
+            ssmDiagPrint(buf);
+            return StreamSessionResult(StreamSessionResultCategory::InvalidSession);
+        }
     }
 
     // Validate RTSP port.

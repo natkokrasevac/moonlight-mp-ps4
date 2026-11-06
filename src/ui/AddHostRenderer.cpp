@@ -81,8 +81,8 @@ ps4::Rect AddHostRenderer::dimBounds() const {
 
 ps4::Rect AddHostRenderer::panelBounds(const AddHostRenderState& state) const {
     if (state.state == AddHostPresentationState::Form) {
-        // 760x460 centered.
-        return ps4::Rect{(1920 - 760) / 2, (1080 - 460) / 2, 760, 460};
+        // 760x520 centered.
+        return ps4::Rect{(1920 - 760) / 2, (1080 - 520) / 2, 760, 520};
     }
     // Status modal: 720x320 centered.
     return ps4::Rect{(1920 - 720) / 2, (1080 - 320) / 2, 720, 320};
@@ -97,15 +97,26 @@ ps4::Rect AddHostRenderer::bounds(const AddHostRenderState& state) const {
 
 // --- Form overlay layout bounds ---------------------------------------------
 
-ps4::Rect AddHostRenderer::ipRowBounds() const {
-    // Form panel is 760x460 centered; IP row starts at margin+70 with height
-    // rowHeight (56). Matches drawFormOverlay.
+ps4::Rect AddHostRenderer::typeRowBounds() const {
     AddHostRenderState formState;
     formState.state = AddHostPresentationState::Form;
     const ps4::Rect panel = panelBounds(formState);
     const float margin = 32.0f;
     const float rowHeight = 56.0f;
-    const float ipRowY = panel.y + margin + 70.0f;
+    const float typeRowY = panel.y + margin + 66.0f;
+    const int pad = 3;
+    return ps4::Rect{panel.x - pad, static_cast<int>(typeRowY) - pad,
+                     panel.w + pad * 2, static_cast<int>(rowHeight) + pad * 2};
+}
+
+ps4::Rect AddHostRenderer::ipRowBounds() const {
+    AddHostRenderState formState;
+    formState.state = AddHostPresentationState::Form;
+    const ps4::Rect panel = panelBounds(formState);
+    const float margin = 32.0f;
+    const float rowHeight = 56.0f;
+    const float typeRowY = panel.y + margin + 66.0f;
+    const float ipRowY = typeRowY + rowHeight + 14.0f;
     const int pad = 3;
     return ps4::Rect{panel.x - pad, static_cast<int>(ipRowY) - pad,
                      panel.w + pad * 2, static_cast<int>(rowHeight) + pad * 2};
@@ -117,26 +128,24 @@ ps4::Rect AddHostRenderer::portRowBounds() const {
     const ps4::Rect panel = panelBounds(formState);
     const float margin = 32.0f;
     const float rowHeight = 56.0f;
-    const float ipRowY = panel.y + margin + 70.0f;
-    const float portRowY = ipRowY + rowHeight + 16.0f;
+    const float typeRowY = panel.y + margin + 66.0f;
+    const float ipRowY = typeRowY + rowHeight + 14.0f;
+    const float portRowY = ipRowY + rowHeight + 14.0f;
     const int pad = 3;
     return ps4::Rect{panel.x - pad, static_cast<int>(portRowY) - pad,
                      panel.w + pad * 2, static_cast<int>(rowHeight) + pad * 2};
 }
 
 ps4::Rect AddHostRenderer::validationBounds() const {
-    // The validation-error region spans from just below the Port row down to
-    // the validation-error line. It is the region that can change when a
-    // validation error appears/disappears. Matches drawFormOverlay's layout.
     AddHostRenderState formState;
     formState.state = AddHostPresentationState::Form;
     const ps4::Rect panel = panelBounds(formState);
     const float margin = 32.0f;
     const float rowHeight = 56.0f;
-    const float ipRowY = panel.y + margin + 70.0f;
-    const float portRowY = ipRowY + rowHeight + 16.0f;
-    const float nextY = portRowY + rowHeight + 16.0f;
-    // The region covers the validation-error line.
+    const float typeRowY = panel.y + margin + 66.0f;
+    const float ipRowY = typeRowY + rowHeight + 14.0f;
+    const float portRowY = ipRowY + rowHeight + 14.0f;
+    const float nextY = portRowY + rowHeight + 10.0f;
     const float lineHeight = 24.0f;   // approximate Regular line height.
     const int pad = 3;
     return ps4::Rect{panel.x - pad, static_cast<int>(nextY) - pad,
@@ -238,9 +247,29 @@ void AddHostRenderer::drawFormOverlay(const AddHostRenderState& state,
     comp.fillRect(panel.x, static_cast<int>(panel.y + margin + 50.0f),
                   panel.w, 2, UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
 
-    // --- IP Address row -----------------------------------------------------
-    const float ipRowY = panel.y + margin + 70.0f;
-    const bool ipSelected = (state.selectedField == 0);
+    // --- Type row -----------------------------------------------------------
+    const float typeRowY = panel.y + margin + 66.0f;
+    const bool typeSelected = (state.selectedField == 0);
+    if (typeSelected) {
+        comp.fillRect(panel.x, static_cast<int>(typeRowY), panel.w,
+                      static_cast<int>(rowHeight),
+                      UiTheme::kSelectionR, UiTheme::kSelectionG, UiTheme::kSelectionB, 255);
+        comp.strokeRect(panel.x, static_cast<int>(typeRowY), panel.w,
+                        static_cast<int>(rowHeight), 2,
+                        UiTheme::kAccentR, UiTheme::kAccentG, UiTheme::kAccentB, 255);
+    }
+    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Regular,
+                                 baselineY, lineHeight);
+    const float typeRowBaseline = typeRowY + (rowHeight - lineHeight) * 0.5f + baselineY;
+    comp.drawText(ps4::FontRasterizer::FontFace::Regular, UiStrings::kType,
+                  contentX, typeRowBaseline, UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+    const char* typeValue = state.isHostnameMode ? "<   Hostname   >" : "<  IP Address  >";
+    comp.drawText(ps4::FontRasterizer::FontFace::Regular, typeValue,
+                  contentX + labelWidth, typeRowBaseline, UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+
+    // --- Address row (IP Address / Hostname) --------------------------------
+    const float ipRowY = typeRowY + rowHeight + 14.0f;
+    const bool ipSelected = (state.selectedField == 1);
     if (ipSelected) {
         comp.fillRect(panel.x, static_cast<int>(ipRowY), panel.w,
                       static_cast<int>(rowHeight),
@@ -249,18 +278,17 @@ void AddHostRenderer::drawFormOverlay(const AddHostRenderState& state,
                         static_cast<int>(rowHeight), 2,
                         UiTheme::kAccentR, UiTheme::kAccentG, UiTheme::kAccentB, 255);
     }
-    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Regular,
-                                 baselineY, lineHeight);
     const float rowBaseline = ipRowY + (rowHeight - lineHeight) * 0.5f + baselineY;
-    comp.drawText(ps4::FontRasterizer::FontFace::Regular, "IP Address",
+    const char* addressLabel = state.isHostnameMode ? UiStrings::kHostname : UiStrings::kIpAddress;
+    comp.drawText(ps4::FontRasterizer::FontFace::Regular, addressLabel,
                   contentX, rowBaseline, UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
     const char* ipValue = state.ipText.empty() ? "(empty)" : state.ipText.c_str();
     comp.drawText(ps4::FontRasterizer::FontFace::Regular, ipValue,
                   contentX + labelWidth, rowBaseline, UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
 
     // --- Port row -----------------------------------------------------------
-    const float portRowY = ipRowY + rowHeight + 16.0f;
-    const bool portSelected = (state.selectedField == 1);
+    const float portRowY = ipRowY + rowHeight + 14.0f;
+    const bool portSelected = (state.selectedField == 2);
     if (portSelected) {
         comp.fillRect(panel.x, static_cast<int>(portRowY), panel.w,
                       static_cast<int>(rowHeight),
@@ -277,7 +305,7 @@ void AddHostRenderer::drawFormOverlay(const AddHostRenderState& state,
                   contentX + labelWidth, portBaseline, UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
 
     // --- Inline validation error --------------------------------------------
-    float nextY = portRowY + rowHeight + 16.0f;
+    float nextY = portRowY + rowHeight + 10.0f;
     if (!state.validationError.empty()) {
         comp.drawText(ps4::FontRasterizer::FontFace::Regular,
                       state.validationError.c_str(),
@@ -294,7 +322,7 @@ void AddHostRenderer::drawFormOverlay(const AddHostRenderState& state,
     const float buttonsY = panel.y + panel.h - buttonHeight - margin;
 
     // Cancel button.
-    const bool cancelSelected = (state.selectedField == 2);
+    const bool cancelSelected = (state.selectedField == 3);
     const int cancelX = static_cast<int>(startX);
     const int cancelY = static_cast<int>(buttonsY);
     if (cancelSelected) {
@@ -311,7 +339,7 @@ void AddHostRenderer::drawFormOverlay(const AddHostRenderState& state,
                      UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
 
     // Add button.
-    const bool addSelected = (state.selectedField == 3);
+    const bool addSelected = (state.selectedField == 4);
     const int addX = static_cast<int>(startX + buttonWidth + gap);
     if (addSelected) {
         comp.fillRect(addX, cancelY, static_cast<int>(buttonWidth),

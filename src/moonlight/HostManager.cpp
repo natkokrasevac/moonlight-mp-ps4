@@ -457,6 +457,15 @@ HostId HostManager::addManualHost(const std::string& ipv4, uint16_t port,
     for (const Host& h : m_hosts) {
         const uint16_t hPort = (h.port != 0) ? h.port : 47989;
         if (hPort == reqPort) {
+            if (!h.hostname.empty() && h.hostname == ipv4) {
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "[host] manual add matched existing host id=%llu by hostname '%s:%u'",
+                         static_cast<unsigned long long>(h.id), ipv4.c_str(),
+                         static_cast<unsigned>(reqPort));
+                hostDiagPrint(buf);
+                return h.id;
+            }
             for (const auto& addr : h.ipv4Addresses) {
                 if (addr == ipv4) {
                     char buf[256];
@@ -480,9 +489,10 @@ HostId HostManager::addManualHost(const std::string& ipv4, uint16_t port,
     // --- Create the manual host placeholder ---------------------------------
     Host host;
     host.id = m_nextHostId++;
-    // Display-name fallback: the numeric IP until serverinfo provides a
+    // Display-name fallback: the address/hostname until serverinfo provides a
     // Sunshine display name.
     host.displayName = ipv4;
+    host.hostname = ipv4;
     host.port = port;
     host.lastSeenMs = nowMs;
     // A manually-added host is a live manual target (not mDNS-discovered) and

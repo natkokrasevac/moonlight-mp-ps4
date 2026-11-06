@@ -94,6 +94,12 @@ constexpr const char* kOk = "OK";
 constexpr const char* kAdd = "Add";
 /// Add Host (panel title). Used by the Add Host form overlay and status modal.
 constexpr const char* kAddHost = "Add Host";
+/// Type (form entry type label). Used by the Add Host form overlay.
+constexpr const char* kType = "Type";
+/// IP Address (entry type value / field label). Used by the Add Host form overlay.
+constexpr const char* kIpAddress = "IP Address";
+/// Hostname (entry type value / field label). Used by the Add Host form overlay.
+constexpr const char* kHostname = "Hostname";
 /// Pairing (screen title). Used by the Pairing screen panel.
 constexpr const char* kPairing = "Pairing";
 /// Help (screen title / legend label). Used by the Help screen title and the

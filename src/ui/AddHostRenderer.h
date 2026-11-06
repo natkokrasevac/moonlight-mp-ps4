@@ -100,7 +100,10 @@ public:
     // These are the single source of the Add Host form's row/button geometry,
     // so dirty-region invalidation and rendering never disagree.
 
-    /// Screen-space bounds of the IP Address row (Form state).
+    /// Screen-space bounds of the Type toggle row (Form state).
+    ps4::Rect typeRowBounds() const;
+
+    /// Screen-space bounds of the IP Address / Hostname row (Form state).
     ps4::Rect ipRowBounds() const;
 
     /// Screen-space bounds of the Port row (Form state).
