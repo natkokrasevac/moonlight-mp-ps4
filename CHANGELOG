@@ -1,5 +1,8 @@
 V2.50 - 2026-11-06
 	Centered Settings overlay into a TV overscan-safe modal dialog
+	Support hostname/DDNS manual host entry with smart port parsing
+	Fix black screen on stream startup with hosts lacking on-demand IDR
+	Fix manual host add duplicate check to consider port as well as IP/hostname
 	Dedicated storage directory (/data/moonlight-mp/) with automatic legacy DX import
 	High-fidelity Size 2 DualShock 4 active controller indicator icons in header
 	Updated Moonlight MP branding for boot and splash screens
