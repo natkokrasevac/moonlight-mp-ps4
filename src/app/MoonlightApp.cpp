@@ -1791,6 +1791,17 @@ void MoonlightApp::update(float deltaTime) {
         // system's Enter Button Assignment.
         if (m_input && m_input->isInitialized()) {
             m_ui->setButtonAssignment(m_input->isCrossAccept());
+
+            uint8_t controllerMask = 0;
+            for (int i = 0; i < ps4::InputManager::kMaxControllers; ++i) {
+                if (m_input->isControllerConnected(i)) {
+                    controllerMask |= static_cast<uint8_t>(1 << i);
+                }
+            }
+            if (controllerMask == 0) {
+                controllerMask = 1;
+            }
+            m_ui->setConnectedControllers(controllerMask);
         }
 
         // Supply the current grid column counts to the UiManager for grid
@@ -5859,6 +5870,11 @@ int MoonlightApp::hostListDirtyRects(const ui::HostListRenderState& prev,
         addRect(m_hostListRenderer->bottomLegendBounds());
     }
 
+    // --- Controller connection change --------------------------------------
+    if (prev.connectedControllersMask != cur.connectedControllersMask) {
+        addRect(m_hostListRenderer->topBarBounds());
+    }
+
     return count;
 }
 
@@ -5948,6 +5964,11 @@ int MoonlightApp::hostGridDirtyRects(const ui::HostGridRenderState& prev,
         addRect(m_hostGridRenderer->bottomLegendBounds());
     }
 
+    // --- Controller connection change --------------------------------------
+    if (prev.connectedControllersMask != cur.connectedControllersMask) {
+        addRect(m_hostGridRenderer->topBarBounds());
+    }
+
     return count;
 }
 
@@ -6013,6 +6034,11 @@ int MoonlightApp::appListDirtyRects(const ui::AppListRenderState& prev,
     // The BottomLegend glyphs change; dirty the legend.
     if (prev.crossIsAccept != cur.crossIsAccept) {
         addRect(m_appListRenderer->bottomLegendBounds());
+    }
+
+    // --- Controller connection change --------------------------------------
+    if (prev.connectedControllersMask != cur.connectedControllersMask) {
+        addRect(m_appListRenderer->topBarBounds());
     }
 
     return count;
@@ -6110,6 +6136,11 @@ int MoonlightApp::appGridDirtyRects(const ui::AppGridRenderState& prev,
     // The BottomLegend glyphs change; dirty the legend.
     if (prev.crossIsAccept != cur.crossIsAccept) {
         addRect(m_appGridRenderer->bottomLegendBounds());
+    }
+
+    // --- Controller connection change --------------------------------------
+    if (prev.connectedControllersMask != cur.connectedControllersMask) {
+        addRect(m_appGridRenderer->topBarBounds());
     }
 
     return count;

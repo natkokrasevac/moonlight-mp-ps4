@@ -69,6 +69,7 @@ struct AppListRenderState {
     int selectedIndex = -1;      ///< Index into `cards` (-1 = none).
     std::string hostName;        ///< Host context for the top bar.
     bool crossIsAccept = true;   ///< System Enter Button Assignment.
+    uint8_t connectedControllersMask = 1; ///< Bitmask of connected controllers (bit 0 = P1, etc.).
 };
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,7 @@ private:
     ps4::CpuImage m_appImg;
     ps4::CpuImage m_atlasImg;
     ps4::CpuImage m_bgImg;
+    ps4::CpuImage m_controllerImg;
     bool m_initialized = false;
 };
 

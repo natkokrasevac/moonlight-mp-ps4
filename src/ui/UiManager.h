@@ -526,6 +526,9 @@ public:
     /// Set the system's Enter Button Assignment.
     void setButtonAssignment(bool crossIsAccept);
 
+    /// Set the bitmask of currently connected controllers (bit 0 = P1, etc.).
+    void setConnectedControllers(uint8_t mask);
+
     /// Provide the console's own IPv4 address. Used to prepopulate the Add
     /// Host overlay's IP field so entering a host on the same network is
     /// easier. Empty string disables prepopulation.

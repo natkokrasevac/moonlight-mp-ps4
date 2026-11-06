@@ -76,6 +76,12 @@ void drawAtlasIcon(ps4::UiCompositor& comp, const ps4::CpuImage& atlas,
 // Image helpers
 // ---------------------------------------------------------------------------
 
+/// Draw 4 controller indicators in the top bar right area.
+/// `controllerMask` is a bitmask where bit 0 is P1, bit 1 is P2, etc.
+void drawControllerIndicators(ps4::UiCompositor& comp,
+                              const ps4::CpuImage& controllerImg,
+                              uint8_t controllerMask);
+
 /// Draw `image` aspect-fit inside the destination rectangle `dstX`/`dstY`/
 /// `dstW`/`dstH`, preserving aspect ratio and centering (letterbox/pillarbox,
 /// no crop, no stretch). Does nothing if `image` is empty. Preserves the exact

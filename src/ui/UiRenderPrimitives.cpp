@@ -99,6 +99,35 @@ void drawAspectFitImage(ps4::UiCompositor& comp, const ps4::CpuPngImage& image,
     }
 }
 
+void drawControllerIndicators(ps4::UiCompositor& comp,
+                              const ps4::CpuImage& controllerImg,
+                              uint8_t controllerMask) {
+    if (controllerImg.rgba == nullptr) {
+        return;
+    }
+
+    const float iconW = 48.0f;
+    const float iconH = 32.0f;
+    const float gap = 12.0f;
+    const float totalW = 4.0f * iconW + 3.0f * gap;
+    const float startX = 1920.0f - UiTheme::kTitleTextX - totalW;
+    const float startY = UiTheme::kTitleTextY - iconH;
+
+    for (int i = 0; i < 4; ++i) {
+        const int dstX = static_cast<int>(startX + static_cast<float>(i) * (iconW + gap));
+        const int dstY = static_cast<int>(startY);
+
+        bool active = (controllerMask & (1 << i)) != 0;
+        if (i == 0 && controllerMask == 0) {
+            active = true;
+        }
+
+        const int srcX = active ? 0 : 48;
+        comp.drawImageSubRect(controllerImg, srcX, 0, 48, 32,
+                              dstX, dstY, static_cast<int>(iconW), static_cast<int>(iconH));
+    }
+}
+
 void drawBackground(ps4::UiCompositor& comp, const ps4::CpuImage& bg) {
     if (bg.rgba == nullptr) {
         return;

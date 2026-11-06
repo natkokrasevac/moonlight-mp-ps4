@@ -127,6 +127,11 @@ bool HostListRenderer::initialize(ps4::FontRasterizer* fonts) {
         } else {
             hostListDiagPrint("[host-list] moonlight_bg.png decode failed (screen uses solid background)");
         }
+
+        ps4::CpuPngImage ctrlPng;
+        if (ps4::decodePngToCpu("/app0/assets/images/controller.png", ctrlPng)) {
+            adoptPng(ctrlPng, m_controllerImg);
+        }
     }
 
     m_initialized = true;
@@ -144,6 +149,10 @@ void HostListRenderer::shutdown() {
     if (m_bgImg.rgba) {
         free(m_bgImg.rgba);
     }
+    if (m_controllerImg.rgba) {
+        free(m_controllerImg.rgba);
+    }
+    m_controllerImg = ps4::CpuImage();
     m_hostImg = ps4::CpuImage();
     m_atlasImg = ps4::CpuImage();
     m_bgImg = ps4::CpuImage();
@@ -254,7 +263,7 @@ void HostListRenderer::renderFull(const HostListRenderState& state,
     // Draw the shared background image (falls back to solid color if empty).
     drawBackground(comp, m_bgImg);
 
-    drawTopBar(comp);
+    drawTopBar(state, comp);
     drawSeparators(comp);
 
     for (int i = 0; i < static_cast<int>(state.cards.size()); ++i) {
@@ -268,7 +277,7 @@ void HostListRenderer::renderFull(const HostListRenderState& state,
 // Top bar
 // ---------------------------------------------------------------------------
 
-void HostListRenderer::drawTopBar(ps4::UiCompositor& comp) {
+void HostListRenderer::drawTopBar(const HostListRenderState& state, ps4::UiCompositor& comp) {
     if (!m_fonts) {
         return;
     }
@@ -283,6 +292,8 @@ void HostListRenderer::drawTopBar(ps4::UiCompositor& comp) {
     comp.drawText(ps4::FontRasterizer::FontFace::Title, "Hosts",
                   UiTheme::kTitleTextX, titleBaseline,
                   UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+
+    drawControllerIndicators(comp, m_controllerImg, state.connectedControllersMask);
 }
 
 // ---------------------------------------------------------------------------

@@ -128,6 +128,11 @@ bool AppListRenderer::initialize(ps4::FontRasterizer* fonts) {
         } else {
             appListDiagPrint("[app-list] moonlight_bg.png decode failed (screen uses solid background)");
         }
+
+        ps4::CpuPngImage ctrlPng;
+        if (ps4::decodePngToCpu("/app0/assets/images/controller.png", ctrlPng)) {
+            adoptPng(ctrlPng, m_controllerImg);
+        }
     }
 
     m_initialized = true;
@@ -145,6 +150,10 @@ void AppListRenderer::shutdown() {
     if (m_bgImg.rgba) {
         free(m_bgImg.rgba);
     }
+    if (m_controllerImg.rgba) {
+        free(m_controllerImg.rgba);
+    }
+    m_controllerImg = ps4::CpuImage();
     m_appImg = ps4::CpuImage();
     m_atlasImg = ps4::CpuImage();
     m_bgImg = ps4::CpuImage();
@@ -293,6 +302,8 @@ void AppListRenderer::drawTopBar(const AppListRenderState& state,
     comp.drawText(ps4::FontRasterizer::FontFace::Title, titleBuf,
                   UiTheme::kTitleTextX, titleBaseline,
                   UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+
+    drawControllerIndicators(comp, m_controllerImg, state.connectedControllersMask);
 }
 
 // ---------------------------------------------------------------------------

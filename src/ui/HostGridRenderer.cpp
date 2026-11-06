@@ -126,6 +126,11 @@ bool HostGridRenderer::initialize(ps4::FontRasterizer* fonts) {
         } else {
             hostGridDiagPrint("[host-grid] moonlight_bg.png decode failed (screen uses solid background)");
         }
+
+        ps4::CpuPngImage ctrlPng;
+        if (ps4::decodePngToCpu("/app0/assets/images/controller.png", ctrlPng)) {
+            adoptPng(ctrlPng, m_controllerImg);
+        }
     }
 
     m_initialized = true;
@@ -143,6 +148,10 @@ void HostGridRenderer::shutdown() {
     if (m_bgImg.rgba) {
         free(m_bgImg.rgba);
     }
+    if (m_controllerImg.rgba) {
+        free(m_controllerImg.rgba);
+    }
+    m_controllerImg = ps4::CpuImage();
     m_hostImg = ps4::CpuImage();
     m_atlasImg = ps4::CpuImage();
     m_bgImg = ps4::CpuImage();
@@ -287,7 +296,7 @@ void HostGridRenderer::renderFull(const HostGridRenderState& state,
     // Draw the shared background image (falls back to solid color if empty).
     drawBackground(comp, m_bgImg);
 
-    drawTopBar(comp);
+    drawTopBar(state, comp);
     drawSeparators(comp);
 
     // The grid is clipped to the scrollable grid viewport.
@@ -306,7 +315,7 @@ void HostGridRenderer::renderFull(const HostGridRenderState& state,
 // Top bar
 // ---------------------------------------------------------------------------
 
-void HostGridRenderer::drawTopBar(ps4::UiCompositor& comp) {
+void HostGridRenderer::drawTopBar(const HostGridRenderState& state, ps4::UiCompositor& comp) {
     if (!m_fonts) {
         return;
     }
@@ -321,6 +330,8 @@ void HostGridRenderer::drawTopBar(ps4::UiCompositor& comp) {
     comp.drawText(ps4::FontRasterizer::FontFace::Title, "Hosts",
                   UiTheme::kTitleTextX, titleBaseline,
                   UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+
+    drawControllerIndicators(comp, m_controllerImg, state.connectedControllersMask);
 }
 
 // ---------------------------------------------------------------------------

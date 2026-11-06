@@ -208,6 +208,7 @@ struct UiManager::Impl {
 
     // --- Button assignment --------------------------------------------------
     bool crossIsAccept = true;
+    uint8_t connectedControllersMask = 1;
 
     // --- Presentation style -------------------------------------------------
     ml::PresentationStyle presentationStyle = ml::PresentationStyle::PlayStation;
@@ -772,6 +773,12 @@ void UiManager::setButtonAssignment(bool crossIsAccept) {
     }
 }
 
+void UiManager::setConnectedControllers(uint8_t mask) {
+    if (m_impl) {
+        m_impl->connectedControllersMask = mask;
+    }
+}
+
 void UiManager::setLocalIpAddress(const std::string& ip) {
     if (m_impl) {
         m_impl->localIpAddress = ip;
@@ -1014,6 +1021,7 @@ bool UiManager::buildHostListRenderState(HostListRenderState& out) const {
     HostListRenderState state;
     state.selectedIndex = m_impl->selectedHostIndex;
     state.crossIsAccept = m_impl->crossIsAccept;
+    state.connectedControllersMask = m_impl->connectedControllersMask;
 
     state.cards.reserve(m_impl->hosts.size());
     for (size_t i = 0; i < m_impl->hosts.size(); ++i) {
@@ -1049,6 +1057,7 @@ bool UiManager::buildHostGridRenderState(HostGridRenderState& out) const {
     HostGridRenderState state;
     state.selectedIndex = m_impl->selectedHostIndex;
     state.crossIsAccept = m_impl->crossIsAccept;
+    state.connectedControllersMask = m_impl->connectedControllersMask;
 
     state.hosts.reserve(m_impl->hosts.size());
     for (size_t i = 0; i < m_impl->hosts.size(); ++i) {
@@ -1088,6 +1097,7 @@ bool UiManager::buildAppListRenderState(AppListRenderState& out) const {
     state.selectedIndex = m_impl->selectedAppIndex;
     state.hostName = m_impl->appListView.hostName;
     state.crossIsAccept = m_impl->crossIsAccept;
+    state.connectedControllersMask = m_impl->connectedControllersMask;
 
     state.cards.reserve(m_impl->appListView.applications.size());
     for (size_t i = 0; i < m_impl->appListView.applications.size(); ++i) {
@@ -1124,6 +1134,7 @@ bool UiManager::buildAppGridRenderState(AppGridRenderState& out) const {
     state.selectedIndex = m_impl->selectedAppIndex;
     state.hostName = m_impl->appListView.hostName;
     state.crossIsAccept = m_impl->crossIsAccept;
+    state.connectedControllersMask = m_impl->connectedControllersMask;
 
     state.cards.reserve(m_impl->appListView.applications.size());
     for (size_t i = 0; i < m_impl->appListView.applications.size(); ++i) {

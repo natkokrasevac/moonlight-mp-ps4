@@ -70,6 +70,7 @@ struct HostListRenderState {
     std::vector<HostListCardRenderData> cards;
     int selectedIndex = -1;      ///< Index into `cards` (-1 = none).
     bool crossIsAccept = true;   ///< System Enter Button Assignment.
+    uint8_t connectedControllersMask = 1; ///< Bitmask of connected controllers (bit 0 = P1, etc.).
 };
 
 // ---------------------------------------------------------------------------
@@ -167,7 +168,7 @@ private:
                   int selectedIndex, ps4::UiCompositor& comp);
 
     /// Draw the top title bar into `comp`.
-    void drawTopBar(ps4::UiCompositor& comp);
+    void drawTopBar(const HostListRenderState& state, ps4::UiCompositor& comp);
 
     /// Draw the single-pixel separator lines at the top bar bottom and the
     /// bottom legend top into `comp`.
@@ -181,6 +182,7 @@ private:
     ps4::CpuImage m_hostImg;
     ps4::CpuImage m_atlasImg;
     ps4::CpuImage m_bgImg;
+    ps4::CpuImage m_controllerImg;
     bool m_initialized = false;
 };
 
