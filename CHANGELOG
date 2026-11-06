@@ -1,3 +1,10 @@
+V2.50 - 2026-11-06
+	Centered Settings overlay into a TV overscan-safe modal dialog
+	Dedicated storage directory (/data/moonlight-mp/) with automatic legacy DX import
+	High-fidelity Size 2 DualShock 4 active controller indicator icons in header
+	Updated Moonlight MP branding for boot and splash screens
+	Rendered 1080p documentation and menu artwork
+
 V2.20 - 2026-11-05
 	DualShock 4 dual-motor force feedback / rumble support (scePadSetVibration)
 	Dynamic in-game RGB light bar color control (scePadSetLightBar)
