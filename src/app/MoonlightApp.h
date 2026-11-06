@@ -571,6 +571,8 @@ private:
     /// video frames instead of the CPU UI compositor. Set on Connected, cleared
     /// on stream stop/termination/failure.
     bool m_streamActive = false;
+    /// Timestamp when Options + L3 chord began being held (0 = not held).
+    uint64_t m_exitChordHoldStartUs = 0;
     /// The decoded frame currently held for presentation (main-thread owned).
     /// Released and re-acquired each render() while streaming.
     ml::DecodedVideoFrame m_heldDecodedFrame;

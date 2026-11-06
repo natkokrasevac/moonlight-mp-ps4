@@ -1047,6 +1047,7 @@ void MoonlightApp::shutdown() {
         m_videoDecoder->shutdown();
     }
     m_streamActive = false;
+    m_exitChordHoldStartUs = 0;
     m_heldDecodedFrame.release();
     m_retiredFrames.clear();
     for (auto& ref : m_streamSlotRefs) {
@@ -1314,13 +1315,15 @@ void MoonlightApp::pollInput() {
         }
     }
 
-    // Stream-exit chord: Options + L3 while a stream is active.
+    // Stream-exit chord: Options + L3 held for 1 second while a stream is active.
     // This is the dedicated stream-exit combination. It stops the stream and
     // returns to the App List. The chord buttons are NOT forwarded to the
     // host (ControllerInputStreaming suppresses them via the exit-chord
-    // precedence in its button mapping).
+    // precedence in its button mapping). Requiring a 1-second hold prevents
+    // accidental stream teardown when tapping Options to pause while sprinting with L3.
     if (m_streamActive && m_controllerInputStreaming &&
         m_controllerInputStreaming->isActive() && m_input) {
+        bool chordHeld = false;
         for (int i = 0; i < ps4::InputManager::kMaxControllers; ++i) {
             ps4::ControllerState state;
             if (m_input->latestControllerState(state, i)) {
@@ -1328,28 +1331,42 @@ void MoonlightApp::pollInput() {
                 const uint32_t kOptions = 0x00000008u;
                 const uint32_t kL3 = 0x00000002u;
                 if ((state.buttons & kOptions) && (state.buttons & kL3)) {
-                    diagPrint("[input] exit chord consumed locally (Options+L3)");
-                    // Stop controller forwarding first (sends neutral if usable),
-                    // then stop the stream connection.
-                    m_controllerInputStreaming->stop();
-                    if (m_streamSessionManager) {
-                        m_streamSessionManager->stop();
-                    }
-
-                    // If quit-on-exit is enabled, request a remote application
-                    // quit via the existing ApplicationSessionManager quit path.
-                    // Local stream teardown does not depend on the remote quit
-                    // succeeding; if it fails, the stream still exits locally and
-                    // the existing application-session error handling reports it.
-                    if (m_settingsManager &&
-                        m_settingsManager->settings().quitAppOnStreamExit) {
-                        diagPrint("[app] quit-on-exit enabled — requesting remote app quit");
-                        handleQuitApplication(m_streamHostId, m_streamAppId);
-                    }
+                    chordHeld = true;
                     break;
                 }
             }
         }
+
+        if (chordHeld) {
+            const uint64_t now = static_cast<uint64_t>(sceKernelGetProcessTime());
+            if (m_exitChordHoldStartUs == 0) {
+                m_exitChordHoldStartUs = now;
+            } else if (now - m_exitChordHoldStartUs >= 1000000u) { // 1.0 second hold
+                m_exitChordHoldStartUs = 0;
+                diagPrint("[input] exit chord held 1s — consumed locally (Options+L3)");
+                // Stop controller forwarding first (sends neutral if usable),
+                // then stop the stream connection.
+                m_controllerInputStreaming->stop();
+                if (m_streamSessionManager) {
+                    m_streamSessionManager->stop();
+                }
+
+                // If quit-on-exit is enabled, request a remote application
+                // quit via the existing ApplicationSessionManager quit path.
+                // Local stream teardown does not depend on the remote quit
+                // succeeding; if it fails, the stream still exits locally and
+                // the existing application-session error handling reports it.
+                if (m_settingsManager &&
+                    m_settingsManager->settings().quitAppOnStreamExit) {
+                    diagPrint("[app] quit-on-exit enabled — requesting remote app quit");
+                    handleQuitApplication(m_streamHostId, m_streamAppId);
+                }
+            }
+        } else {
+            m_exitChordHoldStartUs = 0;
+        }
+    } else {
+        m_exitChordHoldStartUs = 0;
     }
 }
 
@@ -5459,6 +5476,7 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // Exit stream presentation mode. Release the held frame BEFORE
             // stopping the decoder so no presentation reads freed memory.
             m_streamActive = false;
+    m_exitChordHoldStartUs = 0;
             m_streamHostId = 0;
             m_streamAppId = 0;
             m_heldDecodedFrame.release();
@@ -5519,6 +5537,7 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // Exit stream presentation mode. Release the held frame BEFORE
             // stopping the decoder so no presentation reads freed memory.
             m_streamActive = false;
+    m_exitChordHoldStartUs = 0;
             m_streamHostId = 0;
             m_streamAppId = 0;
             m_heldDecodedFrame.release();
@@ -5569,6 +5588,7 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         // Exit stream presentation mode. Release the held frame BEFORE
         // stopping the decoder so no presentation reads freed memory.
         m_streamActive = false;
+    m_exitChordHoldStartUs = 0;
         m_streamHostId = 0;
         m_streamAppId = 0;
         m_heldDecodedFrame.release();

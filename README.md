@@ -108,7 +108,7 @@ make
 | **Game Pause / Options** | Options |
 | **Host PS / Guide Button** | `L1 + R1 + Options` |
 | **Host Touchpad / View / Select** | Touchpad Click |
-| **Exit Stream** | `Options + L3` (any controller) |
+| **Exit Stream** | Hold `Options + L3` for 1 sec (any controller) |
 | **Toggle Mouse Mode** | `Options + Touchpad Click` (Player 1) |
 
 ---

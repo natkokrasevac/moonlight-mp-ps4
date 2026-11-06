@@ -1,4 +1,5 @@
 V2.50 - 2026-11-06
+	Stream-exit chord (Options + L3) now requires a 1-second hold to prevent accidental quits
 	Native Options button mapping: physical Options sends Host Options (Start)
 	Host PS / Guide button mapped to clean L1 + R1 + Options chord with pulse filter
 	Touchpad click mapped directly to Host Touchpad / View / Select button

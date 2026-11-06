@@ -123,11 +123,11 @@ constexpr const char* kHelpInStreamAssignments = "IN-STREAM BUTTON ASSIGNMENTS";
 /// PS/Share reserved note (Help note). Used by the Help screen.
 constexpr const char* kHelpPsShareReserved = "PS and Share buttons on the controller cannot be mapped and used in-stream as they are OS reserved.";
 /// Exit stream (Help instruction). Used by the Help screen.
-constexpr const char* kHelpExitStream = "To exit stream, press [Options] + [L3]";
+constexpr const char* kHelpExitStream = "To exit stream, hold [Options] + [L3] for 1 sec";
 /// PS button (Help instruction). Used by the Help screen.
-constexpr const char* kHelpPsButton = "For [PS] button, press [Options]";
+constexpr const char* kHelpPsButton = "For [PS] button, press L1 + R1 + [Options]";
 /// SELECT / START buttons (Help instruction). Used by the Help screen.
-constexpr const char* kHelpSelectStart = "For SELECT / START, press [TouchpadL] / [TouchpadR]";
+constexpr const char* kHelpSelectStart = "For START / SELECT, press [Options] / [Touchpad]";
 /// Mouse emulation toggle (Help instruction). Used by the Help screen.
 constexpr const char* kHelpMouseEmulation = "Toggle Mouse Emulation On/Off with [Options] + [Touchpad]";
 /// Mouse buttons (Help instruction). Used by the Help screen.
