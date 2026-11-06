@@ -28,6 +28,7 @@
 // ===============================================================================
 
 #include "PairingStore.h"
+#include "StoragePaths.h"
 
 #include <cstdio>                // fopen, fclose, fread, fwrite, fseek, ftell, rewind
 #include <cstring>               // memset, memcpy
@@ -67,13 +68,13 @@ static void psDiagPrint(const char* msg) {
 namespace {
 
 /// Writable application data directory.
-constexpr const char* kStoreDir = "/data/moonlight";
+constexpr const char* kStoreDir = ml::storage::kStorageDir;
 
 /// Identity file path.
-constexpr const char* kIdentityFilePath = "/data/moonlight/identity.bin";
+constexpr const char* kIdentityFilePath = ml::storage::kIdentityFilePath;
 
 /// Trusted-hosts file path.
-constexpr const char* kTrustedHostsFilePath = "/data/moonlight/trusted_hosts.bin";
+constexpr const char* kTrustedHostsFilePath = ml::storage::kTrustedHostsFilePath;
 
 /// Persistence format magic.
 constexpr uint32_t kFormatMagic = 0x4D4C5031;  // "MLP1"
@@ -680,6 +681,48 @@ bool PairingStore::initialize() {
         psDiagPrint(buf);
         // Directory creation failure is not fatal: file operations will fail
         // gracefully and identity will be regenerated on the next launch.
+    }
+
+    // Check if Moonlight MP already has an identity or trusted hosts.
+    // If not, perform a one-time import from legacy Moonlight DX (/data/moonlight)
+    // so existing pairings and settings carry over seamlessly without re-pairing.
+    FILE* checkId = fopen(kIdentityFilePath, "rb");
+    if (!checkId) {
+        FILE* legacyId = fopen(ml::storage::kLegacyIdentityFilePath, "rb");
+        if (legacyId) {
+            fclose(legacyId);
+            psDiagPrint("[pairingstore] legacy Moonlight DX storage detected; importing to Moonlight MP...");
+
+            auto copyFileHelper = [](const char* src, const char* dst) -> bool {
+                FILE* s = fopen(src, "rb");
+                if (!s) return false;
+                FILE* d = fopen(dst, "wb");
+                if (!d) { fclose(s); return false; }
+                char buf[4096];
+                size_t n = 0;
+                bool ok = true;
+                while ((n = fread(buf, 1, sizeof(buf), s)) > 0) {
+                    if (fwrite(buf, 1, n, d) != n) { ok = false; break; }
+                }
+                fclose(s);
+                fclose(d);
+                return ok;
+            };
+
+            bool idOk = copyFileHelper(ml::storage::kLegacyIdentityFilePath, kIdentityFilePath);
+            bool hostsOk = copyFileHelper(ml::storage::kLegacyTrustedHostsFilePath, kTrustedHostsFilePath);
+            bool settingsOk = copyFileHelper(ml::storage::kLegacySettingsFilePath, ml::storage::kSettingsFilePath);
+
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "[pairingstore] legacy DX import complete: identity=%s, hosts=%s, settings=%s",
+                     idOk ? "OK" : "SKIP/ERR",
+                     hostsOk ? "OK" : "SKIP/ERR",
+                     settingsOk ? "OK" : "SKIP/ERR");
+            psDiagPrint(msg);
+        }
+    } else {
+        fclose(checkId);
     }
 
     m_impl->initialized = true;

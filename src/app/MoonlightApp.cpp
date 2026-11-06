@@ -3752,9 +3752,9 @@ void MoonlightApp::handleDeleteHost(ml::HostId hostId) {
 ///   5. Clear the runtime host registry, runtime artwork, and catalog state.
 ///   6. Return the UI to the Host List.
 ///
-/// Only the targeted files/directories under /data/moonlight/ are touched:
+/// Only the targeted files/directories under /data/moonlight-mp/ are touched:
 /// trusted_hosts.bin, the artwork/ directory, identity.bin, and settings.ini.
-/// /data/ and /data/moonlight/ themselves are left intact.
+/// /data/ and /data/moonlight-mp/ themselves are left intact.
 void MoonlightApp::handleResetMoonlight() {
     diagPrint("[reset] persistent-storage reset requested");
 
@@ -3764,7 +3764,7 @@ void MoonlightApp::handleResetMoonlight() {
     }
 
     // --- 2. Delete the AppArtwork cache directory. --------------------------
-    // Only /data/moonlight/artwork is removed; it is recreated automatically
+    // Only /data/moonlight-mp/artwork is removed; it is recreated automatically
     // when new artwork is fetched.
     if (m_appArtworkManager) {
         m_appArtworkManager->clearAllCache();

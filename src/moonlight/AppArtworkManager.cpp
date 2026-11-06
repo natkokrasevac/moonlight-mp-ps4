@@ -36,6 +36,7 @@
 // ===============================================================================
 
 #include "AppArtworkManager.h"
+#include "StoragePaths.h"
 
 #include "HttpClient.h"
 
@@ -81,7 +82,7 @@ constexpr size_t kRequestQueueCapacity = 32;
 constexpr size_t kResultQueueCapacity = 32;
 
 /// Artwork cache root directory.
-constexpr const char* kArtworkRootDir = "/data/moonlight/artwork";
+constexpr const char* kArtworkRootDir = ml::storage::kArtworkRootDir;
 
 /// Default HTTPS port fallback (per Moonlight reference).
 constexpr uint16_t kDefaultHttpsPort = 47984;

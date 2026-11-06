@@ -26,6 +26,7 @@
 // ===============================================================================
 
 #include "SettingsManager.h"
+#include "StoragePaths.h"
 
 #include <cstdio>                // fopen, fclose, fgets, fprintf, remove, rename
 #include <cstdlib>               // strtol
@@ -48,10 +49,10 @@ static void smDiagPrint(const char* msg) {
 namespace {
 
 /// Settings file path.
-constexpr const char* kSettingsFilePath = "/data/moonlight/settings.ini";
+constexpr const char* kSettingsFilePath = ml::storage::kSettingsFilePath;
 
 /// Temp file path used for atomic replacement on save.
-constexpr const char* kSettingsTempPath = "/data/moonlight/settings.tmp";
+constexpr const char* kSettingsTempPath = ml::storage::kSettingsTempPath;
 
 /// Maximum line length for a settings file line.
 constexpr size_t kMaxLineLen = 256;
