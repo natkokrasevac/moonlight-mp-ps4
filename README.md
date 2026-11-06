@@ -1,6 +1,6 @@
 # Moonlight MP for PlayStation 4
 
-**Moonlight MP** is an unofficial Moonlight Game Streaming client for jailbroken PlayStation 4 / PS4 Pro consoles with **multiplayer/multi-controller support**, **dual-motor rumble**, and **dynamic light bar control**.
+**Moonlight MP** is an enhanced, open-source Moonlight Game Streaming client for jailbroken PlayStation 4 and PS4 Pro consoles. Built for local co-op and remote streaming, it brings **4-player multiplayer support**, **dual-motor rumble**, **dynamic light bar feedback**, **active controller indicators**, **DDNS/hostname manual pairing**, and **isolated side-by-side storage**.
 
 > Based on the original **Moonlight DX for PlayStation 4** developed by [Four Letter Workshop](https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4).
 
@@ -9,19 +9,47 @@
 ## Features
 
 ### 🌟 New in Moonlight MP
+
 - **Multi-Controller & Local Co-Op (MP)**: Connect up to 4 DualShock 4 controllers simultaneously for local multiplayer gaming. Secondary controllers are detected dynamically as users or guest accounts sign in (`sceUserServiceGetLoginUserIdList`).
+- **Live Controller HUD Indicators**: Real-time top-bar indicators show connected vs. standby controllers (1–4) across all menus with native DualShock 4 icons.
 - **Dual-Motor Force Feedback (Rumble)**: Hardware dual-motor vibration (`largeMotor` heavy rumble and `smallMotor` light rumble via `scePadSetVibration`) routed independently to each player slot.
 - **Dynamic In-Game RGB Light Bar Colors**: Real-time game-driven light bar illumination (`clSetControllerLED`), reverting cleanly to player slot colors (P1: **Blue**, P2: **Red**, P3: **Green**, P4: **Magenta**) in menus or on disconnect.
+- **Hostname & DDNS Support with Smart Port Parsing**: Add remote PCs using domain names/DDNS (e.g. `myhome.ddns.net`) alongside numeric IPv4. Automatically extracts inline ports (e.g. `hostname:port`) and resolves DNS dynamically upon stream connection.
+- **Independent Storage & Zero-Friction DX Import**: Moonlight MP maintains its own storage directory (`/data/moonlight-mp/`), allowing it to run alongside Moonlight DX without settings or pairing collisions. Automatically imports existing DX pairings on first launch so no re-pairing is needed.
+- **Stream Startup & IDR Recovery Fix**: Fixed black-screen hangs on stream startup with hosts or game engines that do not emit immediate IDR keyframes upon connection.
 - **Universal Stream Exit**: Press `Options + L3` on any connected controller to gracefully exit the stream back to the UI.
 - **Reproducible Docker Build**: Cross-compile the PS4 `.pkg` on Windows, Linux, or macOS with a single command (`.\build-docker.ps1`) without installing toolchains locally.
 
 ### 🛡️ Inherited from Moonlight DX
+
 - **PS4 Pro 4K & HEVC Support**: Hardware-accelerated H.265/HEVC decoding with a true 4K streaming pipeline on PS4 Pro.
 - **Full GPU Acceleration**: Hardware video decoding and GPU-accelerated UI rendering/compositing for low latency and cool console operation.
 - **Touchpad Mouse Emulation**: Touchpad on Controller 1 emulates mouse cursor navigation and clicks.
 - **Hardware Keyboard & Mouse**: Direct pass-through support for USB/Bluetooth keyboards and mice.
 - **PlayStation-Inspired UI**: Clean native interface with choice between classic Grid and PlayStation CrossBar views.
 - **mDNS Auto-Discovery**: Automatic discovery and pairing with local Sunshine and GeForce Experience hosts.
+
+---
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/host_list.png" alt="Moonlight MP Host List with Controller Indicators" width="800">
+  <br>
+  <em>Host List carousel with active controller HUD indicators (top right) and live online/offline host status.</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/add_host_ddns.png" alt="Add Host Manually with Hostname/DDNS toggle" width="800">
+  <br>
+  <em>Manual Host Add dialog featuring Hostname / DDNS mode and automatic inline port parsing.</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/app_grid.png" alt="Moonlight MP App and Game Grid" width="800">
+  <br>
+  <em>Application & Game catalog grid view with player connection status.</em>
+</p>
 
 ---
 
@@ -76,6 +104,7 @@ make
 | **Navigate UI** | D-Pad / Left Stick |
 | **Select / Enter** | ✕ Cross (or ○ Circle based on console setting) |
 | **Back / Cancel** | ○ Circle (or ✕ Cross based on console setting) |
+| **Toggle Hostname / IP** | ▢ Square (in Add Host modal) |
 | **Exit Stream** | `Options + L3` (any controller) |
 | **Toggle Mouse Mode** | Touchpad Click (Player 1) |
 
