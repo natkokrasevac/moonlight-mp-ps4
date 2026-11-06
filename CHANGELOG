@@ -1,8 +1,11 @@
-V2.50 - 2026-11-06
+V2.51 - 2026-11-06
+	Native Options button mapping: physical Options sends Host Options / Start (PLAY_FLAG)
+	Host PS / Guide button mapped to clean L1 + R1 + Options chord with 80 ms pulse filter
+	Touchpad click mapped directly to Host Touchpad / View / Select button (BACK_FLAG)
 	Stream-exit chord (Options + L3) now requires a 1-second hold to prevent accidental quits
-	Native Options button mapping: physical Options sends Host Options (Start)
-	Host PS / Guide button mapped to clean L1 + R1 + Options chord with pulse filter
-	Touchpad click mapped directly to Host Touchpad / View / Select button
+	Updated in-stream button assignments and help hints
+
+V2.50 - 2026-11-06
 	Centered Settings overlay into a TV overscan-safe modal dialog
 	Support hostname/DDNS manual host entry with smart port parsing
 	Fix black screen on stream startup with hosts lacking on-demand IDR
