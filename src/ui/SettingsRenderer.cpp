@@ -16,10 +16,10 @@
 //
 // OpenOrbis Moonlight client — CPU Settings overlay renderer.
 //
-// Implements the SettingsRenderer: draws the Settings overlay (full-screen dim
-// + right-side panel + rows) into the shared CPU UiCompositor surface using
-// only fillRect / strokeRect / drawText / clipping. It consumes a plain
-// SettingsRenderState snapshot and owns the Settings layout geometry.
+// Implements the SettingsRenderer: draws the Settings overlay (centered modal
+// dialog + rows) into the shared CPU UiCompositor surface using only fillRect /
+// strokeRect / drawText / clipping. It consumes a plain SettingsRenderState
+// snapshot and owns the Settings layout geometry.
 //
 // This translation unit contains no OpenOrbis SDK calls.
 // =============================================================================
@@ -90,8 +90,8 @@ ps4::Rect SettingsRenderer::dimBounds() const {
 }
 
 ps4::Rect SettingsRenderer::panelBounds() const {
-    return ps4::Rect{static_cast<int>(panelX()), 0,
-                     static_cast<int>(panelW()), 1080};
+    return ps4::Rect{static_cast<int>(panelX()), static_cast<int>(panelY()),
+                     static_cast<int>(panelW()), static_cast<int>(panelH())};
 }
 
 float SettingsRenderer::rowTop(int rowIndex) const {
@@ -99,7 +99,7 @@ float SettingsRenderer::rowTop(int rowIndex) const {
     // Rows 6-7 (Presentation Style, Show Quit App Dialog) are under the CLIENT
     // header.
     // Rows 8-9 (Speakers, Game Optimization) are under the HOST header.
-    const float baseY = margin() + titleBlockHeight() + sectionHeaderHeight();
+    const float baseY = panelY() + margin() + titleBlockHeight() + sectionHeaderHeight();
     if (rowIndex <= 5) {
         return baseY + rowIndex * rowHeight();
     }
@@ -134,13 +134,15 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
         return;
     }
 
-    // Right-side panel (opaque/semi-opaque). No full-screen dim layer is
-    // applied (removed for the GPU UI path; the settings panel draws directly
-    // over the base screen, consistent with PS UI presentation).
+    // Centered modal panel (opaque/semi-opaque) with outline.
     const int px = static_cast<int>(panelX());
+    const int py = static_cast<int>(panelY());
     const int pw = static_cast<int>(panelW());
-    comp.fillRect(px, 0, pw, 1080,
-                  UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 220);   // ~0.98 alpha dark
+    const int ph = static_cast<int>(panelH());
+    comp.fillRect(px, py, pw, ph,
+                  UiTheme::kPanelFillR, UiTheme::kPanelFillG, UiTheme::kPanelFillB, 250);
+    comp.strokeRect(px, py, pw, ph, 2,
+                    UiTheme::kPanelBorderR, UiTheme::kPanelBorderG, UiTheme::kPanelBorderB, 255);
 
     // Panel content.
     const float contentX = panelX() + margin();
@@ -150,16 +152,16 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
                                  baselineY, lineHeight);
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kSettings,
-                  contentX, margin() + baselineY,
+                  contentX, panelY() + margin() + baselineY,
                   UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
 
     // Separator under the title.
-    const float titleBottom = margin() + titleBlockHeight();
+    const float titleBottom = panelY() + margin() + titleBlockHeight();
     comp.fillRect(px, static_cast<int>(titleBottom - 8.0f),
                   pw, 2, UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
 
     // "STREAM" section header.
-    const float streamHeaderY = margin() + titleBlockHeight();
+    const float streamHeaderY = titleBottom;
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
                                  baselineY, lineHeight);
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kStreamSection,
@@ -202,7 +204,7 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
     // RegularSmall face.
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::RegularSmall,
                                  baselineY, lineHeight);
-    const float footerBottom = 1080.0f - margin();
+    const float footerBottom = panelY() + panelH() - margin();
     const float footerLine1Y = footerBottom - lineHeight * 2.0f;
     const float footerLine2Y = footerBottom - lineHeight;
     comp.drawText(ps4::FontRasterizer::FontFace::RegularSmall, UiStrings::kAppName,
