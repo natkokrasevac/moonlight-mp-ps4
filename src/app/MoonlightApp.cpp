@@ -5782,7 +5782,8 @@ void MoonlightApp::updateUiHostSnapshot() {
                 a.currentGame != b.currentGame ||
                 a.serverId != b.serverId ||
                 a.serverVersion != b.serverVersion ||
-                a.httpsPort != b.httpsPort) {
+                a.httpsPort != b.httpsPort ||
+                a.port != b.port) {
                 snapshotChanged = true;
                 break;
             }
@@ -6705,16 +6706,20 @@ void MoonlightApp::handleAddHost(const std::string& ipv4, uint16_t port) {
              ipv4.c_str(), static_cast<unsigned>(port));
     diagPrint(buf);
 
-    // Determine whether this IP already matches an existing host (i.e., it
-    // was already discovered) before adding. This drives the status modal
-    // message ("already discovered" vs "added to Host List").
+    // Determine whether this IP and port already match an existing host (i.e.,
+    // it was already discovered or added) before adding. This drives the status
+    // modal message ("already in Host List" vs "added to Host List").
     bool wasExisting = false;
     if (m_hostManager) {
+        const uint16_t reqPort = (port != 0) ? port : 47989;
         for (const auto& h : m_hostManager->hosts()) {
-            for (const auto& addr : h.ipv4Addresses) {
-                if (addr == ipv4) {
-                    wasExisting = true;
-                    break;
+            const uint16_t hPort = (h.port != 0) ? h.port : 47989;
+            if (hPort == reqPort) {
+                for (const auto& addr : h.ipv4Addresses) {
+                    if (addr == ipv4) {
+                        wasExisting = true;
+                        break;
+                    }
                 }
             }
             if (wasExisting) {

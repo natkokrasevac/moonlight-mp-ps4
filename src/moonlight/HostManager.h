@@ -236,8 +236,8 @@ public:
     /// applyServerInfo once the serverinfo query succeeds. The host is marked
     /// Online (it is a live manual target) and is NOT treated as discovered.
     ///
-    /// If an existing host already has the same numeric IPv4 address, the
-    /// existing host is returned instead of creating a duplicate card.
+    /// If an existing host already has the same numeric IPv4 address and port,
+    /// the existing host is returned instead of creating a duplicate card.
     ///
     /// Returns the HostId of the affected host, or 0 if the host could not be
     /// added (e.g., registry at capacity).

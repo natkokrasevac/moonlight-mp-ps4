@@ -169,6 +169,9 @@ HostDiscoveryResult HostManager::applyDiscoveryUpdate(const HostDiscoveryUpdate&
             if (h.serverId.empty() || !h.serviceFqdn.empty()) {
                 continue;   // Not a restored placeholder — do not match by IP.
             }
+            if (h.port != 0 && update.port != 0 && h.port != update.port) {
+                continue;   // Different port — do not match.
+            }
             for (const auto& addr : h.ipv4Addresses) {
                 if (addr == update.ipv4Address) {
                     idx = static_cast<int>(i);
@@ -445,19 +448,25 @@ HostId HostManager::addManualHost(const std::string& ipv4, uint16_t port,
         return 0;
     }
 
-    // --- Duplicate suppression by numeric IPv4 ------------------------------
-    // If an existing host already has this numeric IPv4 address, return it
-    // instead of creating a duplicate card. This is safe because the numeric
-    // IPv4 is the bootstrap identity for a manual host.
+    // --- Duplicate suppression by numeric IPv4 and port ---------------------
+    // If an existing host already has this numeric IPv4 address and matching
+    // port, return it instead of creating a duplicate card. This is safe
+    // because the (IPv4, port) tuple is the bootstrap identity for a manual
+    // host.
+    const uint16_t reqPort = (port != 0) ? port : 47989;
     for (const Host& h : m_hosts) {
-        for (const auto& addr : h.ipv4Addresses) {
-            if (addr == ipv4) {
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                         "[host] manual add matched existing host id=%llu by address '%s'",
-                         static_cast<unsigned long long>(h.id), ipv4.c_str());
-                hostDiagPrint(buf);
-                return h.id;
+        const uint16_t hPort = (h.port != 0) ? h.port : 47989;
+        if (hPort == reqPort) {
+            for (const auto& addr : h.ipv4Addresses) {
+                if (addr == ipv4) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                             "[host] manual add matched existing host id=%llu by address '%s:%u'",
+                             static_cast<unsigned long long>(h.id), ipv4.c_str(),
+                             static_cast<unsigned>(reqPort));
+                    hostDiagPrint(buf);
+                    return h.id;
+                }
             }
         }
     }
