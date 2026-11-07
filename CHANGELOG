@@ -1,3 +1,13 @@
+V2.70 - 2026-11-07
+	Forward L3 unconditionally and replay buffered 80 ms Options pulse when released before 1s exit hold
+	Evaluate L1 + R1 + Options -> PS/Guide and exit chord state machines every frame for exact 80 ms pulse timing
+	Bypass button-chord state machines on neutral controller packets and scope P1 chords strictly to Controller 1
+	Protect controller slot polling with padMutex and support black (off) RGB light bar overrides from host games
+	Improve manual host hostname vs. IPv4 handling and RFC 1123 hostname validation in Add Host dialog
+	Consolidate serverinfo codec mode defaults and prevent unreferenced P-frame decode loops during IDR recovery
+	Make legacy Moonlight DX storage import atomic via temporary files and non-destructive checks
+	Resolve libssl1.1 package dynamically from Ubuntu archive in Docker build environment
+
 V2.60 - 2026-11-07
 	Add UTF-8 multi-byte codepoint decoding to FontRasterizer (fixes ™, symbols, and accents)
 	Add UTF-8 boundary-safe ellipsis truncation for long titles
