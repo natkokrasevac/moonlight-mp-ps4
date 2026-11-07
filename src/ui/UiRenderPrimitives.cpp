@@ -482,7 +482,15 @@ std::string truncateTextWithEllipsis(ps4::FontRasterizer& fonts,
     // glyph metrics (no rasterization), so this is negligible.
     std::string s(text);
     while (!s.empty()) {
-        s.pop_back();
+        // Pop full UTF-8 codepoint (continuation bytes then the lead byte).
+        do {
+            unsigned char b = static_cast<unsigned char>(s.back());
+            s.pop_back();
+            if ((b & 0xC0) != 0x80) {
+                break;
+            }
+        } while (!s.empty());
+
         if (fonts.measureTextWidth(face, s.c_str()) + ellipsisW <= maxW) {
             return s + kEllipsis;
         }

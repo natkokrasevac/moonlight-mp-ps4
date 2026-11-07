@@ -19,7 +19,7 @@
 // Implements the FontRasterizer component:
 //   - Initializes the FreeType library.
 //   - Opens the embedded Noto Sans font faces (Regular/Bold semantics).
-//   - Rasterizes ASCII text on the CPU into A8 coverage buffers.
+//   - Rasterizes UTF-8 text on the CPU into A8 coverage buffers.
 //   - Blends glyph coverage into a CPU RGBA8 surface.
 //   - Provides text measurement and layout for the compositor.
 //   - Caches rasterized glyphs so repeated draws do not re-rasterize.
@@ -379,6 +379,49 @@ void blendGlyphIntoRgba(uint8_t* rgba, int surfaceW, int surfaceH, int pitch,
     }
 }
 
+/// Decode the next UTF-8 codepoint from the null-terminated string `p`.
+/// Advances `p` past the decoded bytes. Returns 0 at string end or on null.
+static inline uint32_t nextUtf8Codepoint(const char*& p) {
+    if (!p || *p == '\0') {
+        return 0;
+    }
+    const unsigned char c0 = static_cast<unsigned char>(*p++);
+    if (c0 < 0x80) {
+        return c0;
+    }
+    // 2-byte sequence: 110xxxxx 10xxxxxx
+    if ((c0 & 0xE0) == 0xC0) {
+        if (*p != '\0' && (*p & 0xC0) == 0x80) {
+            const unsigned char c1 = static_cast<unsigned char>(*p++);
+            return ((c0 & 0x1F) << 6) | (c1 & 0x3F);
+        }
+        return c0;
+    }
+    // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
+    if ((c0 & 0xF0) == 0xE0) {
+        if (*p != '\0' && (*p & 0xC0) == 0x80 &&
+            *(p + 1) != '\0' && (*(p + 1) & 0xC0) == 0x80) {
+            const unsigned char c1 = static_cast<unsigned char>(*p++);
+            const unsigned char c2 = static_cast<unsigned char>(*p++);
+            return ((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+        }
+        return c0;
+    }
+    // 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+    if ((c0 & 0xF8) == 0xF0) {
+        if (*p != '\0' && (*p & 0xC0) == 0x80 &&
+            *(p + 1) != '\0' && (*(p + 1) & 0xC0) == 0x80 &&
+            *(p + 2) != '\0' && (*(p + 2) & 0xC0) == 0x80) {
+            const unsigned char c1 = static_cast<unsigned char>(*p++);
+            const unsigned char c2 = static_cast<unsigned char>(*p++);
+            const unsigned char c3 = static_cast<unsigned char>(*p++);
+            return ((c0 & 0x07) << 18) | ((c1 & 0x3F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+        }
+        return c0;
+    }
+    return c0;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -421,9 +464,12 @@ float FontRasterizer::measureTextWidth(FontFace face, const char* text) {
 
     float x = 0.0f;
     uint32_t preCode = 0;
-    for (const char* p = text; *p != '\0'; ++p) {
-        const uint32_t code =
-            static_cast<uint32_t>(static_cast<unsigned char>(*p));
+    const char* p = text;
+    while (*p != '\0') {
+        const uint32_t code = nextUtf8Codepoint(p);
+        if (code == 0) {
+            break;
+        }
 
         // Apply kerning between the previous and current character.
         if (preCode != 0) {
@@ -474,9 +520,12 @@ float FontRasterizer::drawText(FontFace face, const char* text,
     const float startX = x;
     float penX = x;
     uint32_t preCode = 0;
-    for (const char* p = text; *p != '\0'; ++p) {
-        const uint32_t code =
-            static_cast<uint32_t>(static_cast<unsigned char>(*p));
+    const char* p = text;
+    while (*p != '\0') {
+        const uint32_t code = nextUtf8Codepoint(p);
+        if (code == 0) {
+            break;
+        }
 
         // Apply kerning between the previous and current character. Kerning is
         // pair-dependent and is deliberately NOT baked into the per-glyph
