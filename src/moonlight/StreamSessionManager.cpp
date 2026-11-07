@@ -88,6 +88,10 @@ constexpr size_t kAudioQueueCapacity = 30;
 /// Matches MAX_PACKET_SIZE in moonlight-common-c AudioStream.c.
 constexpr size_t kMaxAudioPacketSize = 1400;
 
+/// Maximum encoded video access unit size (bytes).
+/// Matches kMaxVideoUnitSize in VideoDecoder.cpp (8 MiB, sized for 4K / 80 Mbps IDRs).
+constexpr size_t kMaxVideoUnitSize = 8 * 1024 * 1024;
+
 /// Remote input AES key/IV length (bytes).
 constexpr size_t kRemoteInputKeyLen = 16;
 
@@ -440,7 +444,18 @@ int ssmVideoSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
 
     // Validate the decode unit.
     if (decodeUnit == nullptr || decodeUnit->bufferList == nullptr ||
-        decodeUnit->fullLength <= 0) {
+        decodeUnit->fullLength <= 0 ||
+        static_cast<size_t>(decodeUnit->fullLength) > kMaxVideoUnitSize) {
+        if (decodeUnit != nullptr &&
+            static_cast<size_t>(decodeUnit->fullLength) > kMaxVideoUnitSize) {
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                     "[stream] video decode unit rejected: frame=%u type=%s bytes=%d exceeds max=%zu",
+                     static_cast<unsigned>(decodeUnit->frameNumber),
+                     decodeUnit->frameType == FRAME_TYPE_IDR ? "IDR" : "PFRAME",
+                     decodeUnit->fullLength, kMaxVideoUnitSize);
+            ssmDiagPrint(buf);
+        }
         return DR_NEED_IDR;
     }
 

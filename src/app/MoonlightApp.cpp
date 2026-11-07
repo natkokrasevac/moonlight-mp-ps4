@@ -1742,6 +1742,14 @@ void MoonlightApp::processAsyncResults(uint64_t nowMs) {
             handleAudioDecodeOutputUpdate(adoUpdate);
         }
     }
+
+    // --- 8. Consume completed VideoDecoder updates -------------------------
+    if (m_videoDecoder) {
+        ml::VideoDecoderUpdate vdUpdate;
+        while (m_videoDecoder->pollUpdate(vdUpdate)) {
+            handleVideoDecoderUpdate(vdUpdate);
+        }
+    }
 }
 
 // Phase 4: Update application and screen state.
@@ -5423,9 +5431,13 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             if (!gvr.succeeded()) {
                 char buf[160];
                 snprintf(buf, sizeof(buf),
-                         "[stream] GPU video renderer init failed: category=%d",
+                         "[stream] GPU video renderer init failed: category=%d — stopping stream",
                          static_cast<int>(gvr.category));
                 diagPrint(buf);
+                if (m_streamSessionManager) {
+                    m_streamSessionManager->stop();
+                }
+                break;
             } else {
                 diagPrint("[stream] GPU video renderer initialized");
             }
@@ -5651,6 +5663,41 @@ void MoonlightApp::handleAudioDecodeOutputUpdate(
 
     case ml::AudioDecodeOutputUpdateType::Stopped:
         diagPrint("[app] audio: stopped");
+        break;
+
+    default:
+        break;
+    }
+}
+
+/// Handle a VideoDecoder update emitted by the video decoder.
+void MoonlightApp::handleVideoDecoderUpdate(
+    const ml::VideoDecoderUpdate& update) {
+    switch (update.type) {
+    case ml::VideoDecoderUpdateType::Started:
+        diagPrint("[app] video decoder: started");
+        break;
+
+    case ml::VideoDecoderUpdateType::Recovered:
+        diagPrint("[app] video decoder: recovered on IDR");
+        break;
+
+    case ml::VideoDecoderUpdateType::Failed:
+        {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "[app] video decoder: FAILED (category=%d nativeError=0x%08X) — stopping stream",
+                     static_cast<int>(update.result),
+                     static_cast<uint32_t>(update.nativeError));
+            diagPrint(buf);
+            if (m_streamSessionManager && m_streamSessionManager->isActive()) {
+                m_streamSessionManager->stop();
+            }
+        }
+        break;
+
+    case ml::VideoDecoderUpdateType::Stopped:
+        diagPrint("[app] video decoder: stopped");
         break;
 
     default:

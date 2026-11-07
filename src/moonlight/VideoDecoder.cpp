@@ -116,6 +116,10 @@ namespace {
 // SCE_VIDEODEC2_ERROR_NEW_SEQUENCE = 0x811D0300. Returned by Decode() when the
 // input stream changes to a new sequence; the decoder must be reset.
 #define ORBIS_VIDEODEC2_ERROR_NEW_SEQUENCE     0x811D0300u
+// SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE = 0x811D0302. Returned by Decode() when
+// the bitstream's SPS level, coded dimensions, or DPB reference count exceeds
+// the decoder instance configuration.
+#define ORBIS_VIDEODEC2_ERROR_OVERSIZE_DECODE  0x811D0302u
 
 struct Vd2ComputeConfigInfo {
     uint64_t thisSize;
@@ -271,7 +275,8 @@ constexpr size_t kUpdateQueueCapacity = 8;
 constexpr size_t kInputQueueCapacity = 8;
 
 /// Maximum encoded video unit size (bytes).
-constexpr size_t kMaxVideoUnitSize = 1024 * 1024;
+/// Sized to accommodate high-bitrate (40/80 Mbps) and 4K IDR keyframes.
+constexpr size_t kMaxVideoUnitSize = 8 * 1024 * 1024;
 
 /// Worker idle sleep in microseconds (when no input and not stopping).
 constexpr uint64_t kWorkerIdleSleepUs = 1000;
@@ -384,7 +389,11 @@ struct DmemBlock {
 struct FrameBuffer {
     void* address = nullptr;   ///< Base address (256-byte aligned).
     size_t size = 0;           ///< Buffer size.
-    bool leased = false;       ///< True if currently leased to a consumer.
+    std::atomic<bool> leased{false};  ///< True if currently leased to a consumer.
+    bool inDecoderPipeline = false;   ///< True while accepted and in-flight inside Videodec2.
+    uint64_t pipelineSubmitSeq = 0;   ///< decodeCallSeq when accepted into the pipeline.
+    uint64_t pipelineFrameNumber = 0; ///< Frame number submitted with this surface.
+    uint64_t pipelinePtsUs = 0;       ///< Presentation timestamp submitted with this surface.
     /// Reuse generation. Incremented each time the surface is re-acquired for
     /// a new decode. The renderer reads this via surfaceGeneration() to detect
     /// whether a surface it still holds has been reused (overwritten) by the
@@ -555,8 +564,14 @@ struct VideoDecoder::Impl {
     // --- Helper: acquire a free frame buffer --------------------------------
     int acquireFreeFrameBuffer() {
         for (size_t i = 0; i < kFrameBufferCount; ++i) {
-            if (!frameBuffers[i].leased) {
-                frameBuffers[i].leased = true;
+            if (frameBuffers[i].inDecoderPipeline) {
+                continue;
+            }
+            bool expected = false;
+            if (frameBuffers[i].leased.compare_exchange_strong(
+                    expected, true,
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
                 // Increment the reuse generation so the renderer can detect
                 // that this surface has been re-acquired for a new decode.
                 frameBuffers[i].generation.fetch_add(1, std::memory_order_relaxed);
@@ -569,9 +584,67 @@ struct VideoDecoder::Impl {
     // --- Helper: release a frame buffer back to the pool --------------------
     void releaseFrameBuffer(int index) {
         if (index >= 0 && index < static_cast<int>(kFrameBufferCount)) {
-            frameBuffers[index].leased = false;
+            frameBuffers[index].leased.store(false, std::memory_order_release);
         }
     }
+
+    // --- Helper: find the pool index matching an output frameBuffer ptr -----
+    int findFrameBufferIndex(const void* addr) const {
+        for (size_t i = 0; addr != nullptr && i < kFrameBufferCount; ++i) {
+            if (frameBuffers[i].address == addr) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    // --- Helper: reclaim any pipeline-accepted buffer never output ----------
+    void retireStalePipelineBuffers(uint64_t currentSeq) {
+        const uint64_t maxAge = static_cast<uint64_t>(decodePipelineDepth) * 2u;
+        for (size_t i = 0; i < kFrameBufferCount; ++i) {
+            if (frameBuffers[i].inDecoderPipeline &&
+                frameBuffers[i].pipelineSubmitSeq + maxAge <= currentSeq) {
+                frameBuffers[i].inDecoderPipeline = false;
+                frameBuffers[i].leased.store(false, std::memory_order_release);
+            }
+        }
+    }
+
+    // --- Helper: clear in-flight pipeline state on Reset() ------------------
+    void clearPipelineBuffers() {
+        for (size_t i = 0; i < kFrameBufferCount; ++i) {
+            if (frameBuffers[i].inDecoderPipeline) {
+                frameBuffers[i].inDecoderPipeline = false;
+                frameBuffers[i].leased.store(false, std::memory_order_release);
+            }
+        }
+    }
+
+    // --- Helper: release all per-session Videodec2 and DmemBlock resources --
+    void releaseSessionResources() {
+        if (decoder && api.DeleteDecoder) {
+            api.DeleteDecoder(decoder);
+        }
+        decoder = nullptr;
+        if (api.queue && api.ReleaseComputeQueue) {
+            api.ReleaseComputeQueue(api.queue);
+        }
+        api.queue = nullptr;
+        frameBufferMem.release();
+        cpuGpuMem.release();
+        gpuMem.release();
+        cpuMem.release();
+        computeMem.release();
+        for (size_t i = 0; i < kFrameBufferCount; ++i) {
+            frameBuffers[i].address = nullptr;
+            frameBuffers[i].size = 0;
+            frameBuffers[i].inDecoderPipeline = false;
+            frameBuffers[i].leased.store(false, std::memory_order_release);
+        }
+    }
+
+    bool oversizeEscalated = false;
+    bool escalateDecoderForOversize();
 };
 
 // ---------------------------------------------------------------------------
@@ -741,6 +814,7 @@ int vdLoadVdecDeps() {
         // optional dependency (a failure is logged but not fatal) so AVC-only
         // decode still works if the module is absent or named differently.
         "/system/common/lib/libSceVdecSdec.sprx",
+        "/system/common/lib/libSceVdecShevc.sprx",
         "/system/common/lib/libSceVdecwrap.sprx",
     };
     for (size_t i = 0; i < sizeof(mods) / sizeof(mods[0]); ++i) {
@@ -904,8 +978,11 @@ uint32_t vdAvcLevelForStream(int h, uint32_t bitrateKbps) {
 
 // AVC DPB frame count per the SDK preset table (resolution-dependent):
 //   720p -> 5, 1080p -> 4, 2160p -> 5.
-int32_t vdAvcDpbForHeight(int h) {
+// When the configured level is >= L5.0 (e.g. high-bitrate 1080p or escalated),
+// H.264 Annex A MaxDpbMbs supports >= 5 reference frames at 1080p as well.
+int32_t vdAvcDpbForHeight(int h, uint32_t level = 0) {
     if (h > 1080) return 5;   // 2160p preset: DPB 5
+    if (level >= ORBIS_VIDEODEC2_AVC_LEVEL_5_0) return 5;
     if (h > 720)  return 4;   // 1080p preset: DPB 4
     return 5;                 // 720p preset: DPB 5
 }
@@ -984,7 +1061,7 @@ void vdFillDecoderConfig(Vd2DecoderConfigInfo* dc, Vd2ComputeQueue q,
         dc->profile = ORBIS_VIDEODEC2_PROFILE_HIGH;
         dc->maxLevel = vdAvcLevelForStream(h, bitrateKbps);
         dc->maxFrameHeight = (h + 15) & ~15;  // AVC: multiple of 16.
-        dc->maxDpbFrameCount = vdAvcDpbForHeight(h);
+        dc->maxDpbFrameCount = vdAvcDpbForHeight(h, dc->maxLevel);
         dc->extraConfigInfo = nullptr;
     }
     dc->decodePipelineDepth = static_cast<uint32_t>(pipelineDepth);
@@ -998,6 +1075,58 @@ void vdFillDecoderConfig(Vd2DecoderConfigInfo* dc, Vd2ComputeQueue q,
 }
 
 } // namespace
+
+// Escalate a running decoder instance in-place to maximum level and DPB when
+// the host bitstream's SPS level or reference frame count exceeds the initial
+// preset (SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE = 0x811D0302).
+bool VideoDecoder::Impl::escalateDecoderForOversize() {
+    if (!api.QueryDecoderMemoryInfo || !api.CreateDecoder) {
+        return false;
+    }
+    const bool hevc = (config.codec == VideoCodec::H265);
+    Vd2DecoderConfigInfo dc;
+    Vd2HevcExtraConfigInfo hevcExtra;
+    vdFillDecoderConfig(&dc, api.queue, static_cast<int>(config.width),
+                        static_cast<int>(config.height),
+                        static_cast<int>(decodePipelineDepth),
+                        ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT, hevc, 300000u,
+                        &hevcExtra);
+    Vd2DecoderMemoryInfo dm = {};
+    dm.thisSize = sizeof(dm);
+    if (api.QueryDecoderMemoryInfo(&dc, &dm) != 0) {
+        return false;
+    }
+    if (decoder && api.DeleteDecoder) {
+        api.DeleteDecoder(decoder);
+        decoder = nullptr;
+    }
+    clearRetainedAus();
+    clearPipelineBuffers();
+
+    auto ensureBlock = [](DmemBlock& blk, uint64_t need, int memType, void*& outPtr) {
+        if (need == 0) return true;
+        if (blk.totalSize < static_cast<size_t>(need)) {
+            blk.release();
+            if (!blk.allocate(static_cast<size_t>(need), memType, kDmemProt)) return false;
+        } else if (blk.baseAddress) {
+            memset(blk.baseAddress, 0, blk.totalSize);
+        }
+        outPtr = blk.baseAddress;
+        return true;
+    };
+    if (!ensureBlock(cpuMem, dm.cpuMemorySize, kDmemTypeOnion, dm.cpuMemory) ||
+        !ensureBlock(gpuMem, dm.gpuMemorySize, kDmemTypeGarlic, dm.gpuMemory) ||
+        !ensureBlock(cpuGpuMem, dm.cpuGpuMemorySize, kDmemTypeOnion, dm.cpuGpuMemory)) {
+        return false;
+    }
+    Vd2Decoder dec = nullptr;
+    if (api.CreateDecoder(&dc, &dm, &dec) != 0 || dec == nullptr) {
+        return false;
+    }
+    decoder = dec;
+    vdDiagPrint("[video] escalated decoder for OVERSIZE_DECODE to max level/DPB");
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Decoder worker thread
@@ -1050,6 +1179,13 @@ void* VideoDecoder::decoderWorker(void* arg) {
             unit.fullLength == 0 ||
             unit.data.size() != unit.fullLength ||
             unit.data.size() > kMaxVideoUnitSize) {
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                     "[video] unit rejected: frame=%llu type=%s fullLength=%u size=%zu max=%zu codec=0x%x",
+                     static_cast<unsigned long long>(unit.frameNumber),
+                     unit.frameType == 1 ? "IDR" : "PFRAME",
+                     unit.fullLength, unit.data.size(), kMaxVideoUnitSize, unit.codecType);
+            vdDiagPrint(buf);
             // Invalid unit — discard and request IDR.
             impl->decodeErrors.fetch_add(1);
             LiRequestIdrFrame();
@@ -1158,7 +1294,34 @@ void* VideoDecoder::decoderWorker(void* arg) {
                 impl->api.Reset(impl->decoder);
             }
             impl->clearRetainedAus();
+            impl->clearPipelineBuffers();
             rc = impl->api.Decode(impl->decoder, &inputData, &frameBuffer, &outputInfo);
+        }
+
+        // Oversize stream: if the host encoder's SPS level or DPB reference
+        // count exceeds the initial preset configuration, escalate the decoder
+        // instance to maximum level/DPB once per session and re-submit the AU.
+        if (static_cast<uint32_t>(rc) == ORBIS_VIDEODEC2_ERROR_OVERSIZE_DECODE &&
+            !impl->oversizeEscalated) {
+            impl->oversizeEscalated = true;
+            vdDiagPrint("[video] OVERSIZE_DECODE detected; escalating decoder to max level/DPB");
+            if (impl->escalateDecoderForOversize()) {
+                memset(&frameBuffer, 0, sizeof(frameBuffer));
+                frameBuffer.thisSize = sizeof(frameBuffer);
+                frameBuffer.frameBuffer = impl->frameBuffers[bufIndex].address;
+                frameBuffer.frameBufferSize = impl->frameBuffers[bufIndex].size;
+                memset(&outputInfo, 0, sizeof(outputInfo));
+                outputInfo.thisSize = sizeof(outputInfo);
+                rc = impl->api.Decode(impl->decoder, &inputData, &frameBuffer, &outputInfo);
+                if (static_cast<uint32_t>(rc) == ORBIS_VIDEODEC2_ERROR_NEW_SEQUENCE) {
+                    if (impl->api.Reset) {
+                        impl->api.Reset(impl->decoder);
+                    }
+                    impl->clearRetainedAus();
+                    impl->clearPipelineBuffers();
+                    rc = impl->api.Decode(impl->decoder, &inputData, &frameBuffer, &outputInfo);
+                }
+            }
         }
 
         const uint64_t elapsedUs = static_cast<uint64_t>(sceKernelGetProcessTime()) - tDecode;
@@ -1174,6 +1337,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
         // unit.data is moved (no byte copy); the decoder no longer needs the
         // pointer after sceVideodec2Decode() returns.
         impl->retireExpiredAus(submitSeq);
+        impl->retireStalePipelineBuffers(submitSeq);
         impl->retainAu(std::move(unit.data), submitSeq, unit.frameNumber);
 
         // Signal that all CPU-side command-buffer submissions are complete.
@@ -1243,6 +1407,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
                 // Reset aborts in-flight frame-parallel processing; the
                 // decoder no longer references any input AUs.
                 impl->clearRetainedAus();
+                impl->clearPipelineBuffers();
                 impl->state = VideoDecoderState::WaitingForIdr;
                 impl->waitingIdrDropCount = 0;
                 LiRequestIdrFrame();
@@ -1260,25 +1425,63 @@ void* VideoDecoder::decoderWorker(void* arg) {
             continue;
         }
 
-        // --- Check the output ------------------------------------------------
-        if (!outputInfo.isValid || outputInfo.isErrorFrame) {
-            // No valid output for this AU, or the frame is an error frame.
+        // --- Track pipeline acceptance and resolve output buffer index -------
+        if (frameBuffer.isAccepted) {
+            impl->frameBuffers[bufIndex].inDecoderPipeline = true;
+            impl->frameBuffers[bufIndex].pipelineSubmitSeq = submitSeq;
+            impl->frameBuffers[bufIndex].pipelineFrameNumber = unit.frameNumber;
+            impl->frameBuffers[bufIndex].pipelinePtsUs = unit.presentationTimeUs;
+        }
+
+        int outBufIndex = -1;
+        if (outputInfo.isValid && outputInfo.frameBuffer != nullptr) {
+            outBufIndex = impl->findFrameBufferIndex(outputInfo.frameBuffer);
+        }
+
+        // If the decoder did not accept bufIndex into its pipeline and did not
+        // output it directly in outputInfo.frameBuffer, release bufIndex now.
+        if (!frameBuffer.isAccepted && outBufIndex != bufIndex) {
             impl->releaseFrameBuffer(bufIndex);
+        }
+
+        // --- Check the output ------------------------------------------------
+        if (!outputInfo.isValid || outBufIndex < 0) {
+            // No valid output for this AU yet (still in the frame-parallel
+            // pipeline). If accepted, bufIndex remains leased in-pipeline.
             continue;
         }
+
+        const uint64_t outFrameNumber =
+            impl->frameBuffers[outBufIndex].inDecoderPipeline
+                ? impl->frameBuffers[outBufIndex].pipelineFrameNumber
+                : unit.frameNumber;
+        const uint64_t outPtsUs =
+            impl->frameBuffers[outBufIndex].inDecoderPipeline
+                ? impl->frameBuffers[outBufIndex].pipelinePtsUs
+                : unit.presentationTimeUs;
+        impl->frameBuffers[outBufIndex].inDecoderPipeline = false;
+
+        if (outputInfo.isErrorFrame) {
+            // The output frame is flagged as an error frame; return its slot.
+            impl->releaseFrameBuffer(outBufIndex);
+            continue;
+        }
+
+        // Ensure outBufIndex is marked leased for the DecodedVideoFrame.
+        impl->frameBuffers[outBufIndex].leased.store(true, std::memory_order_release);
 
         // --- Build the DecodedVideoFrame ------------------------------------
         DecodedVideoFrame::Impl* frameImpl = new DecodedVideoFrame::Impl();
         frameImpl->decoder = impl;
-        frameImpl->frameBufferIndex = bufIndex;
+        frameImpl->frameBufferIndex = outBufIndex;
         frameImpl->valid = true;
-        frameImpl->frameNumber = unit.frameNumber;
-        frameImpl->presentationTimeUs = unit.presentationTimeUs;
+        frameImpl->frameNumber = outFrameNumber;
+        frameImpl->presentationTimeUs = outPtsUs;
         frameImpl->decodeTimeUs = elapsedUs;
         frameImpl->width = outputInfo.frameWidth;
         frameImpl->height = impl->config.height;
         frameImpl->surfaceHeight = outputInfo.frameHeight;
-        frameImpl->surfaceSlot = static_cast<uint32_t>(bufIndex);
+        frameImpl->surfaceSlot = static_cast<uint32_t>(outBufIndex);
         frameImpl->pitch = outputInfo.framePitchInBytes;
         frameImpl->format = VideoPixelFormat::NV12;
         frameImpl->yPlane = outputInfo.frameBuffer;
@@ -1514,6 +1717,16 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
                         config.bitrateKbps,
                         &hevcExtra);
 
+    auto failStart = [this](VideoDecoderResultCategory cat, int32_t err = 0) {
+        m_impl->releaseSessionResources();
+        VideoDecoderUpdate update;
+        update.type = VideoDecoderUpdateType::Failed;
+        update.result = cat;
+        update.nativeError = err;
+        m_impl->pushUpdate(update);
+        return VideoDecoderResult(cat, err);
+    };
+
     Vd2DecoderMemoryInfo dm;
     memset(&dm, 0, sizeof(dm));
     dm.thisSize = sizeof(dm);
@@ -1525,7 +1738,7 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
                  "[video-decoder] QueryDecoderMemoryInfo failed: 0x%08X",
                  static_cast<uint32_t>(rc));
         vdDiagPrint(buf);
-        return VideoDecoderResult(VideoDecoderResultCategory::DecoderInitializationFailure, rc);
+        return failStart(VideoDecoderResultCategory::DecoderInitializationFailure, rc);
     }
 
     // --- Allocate decoder memories -------------------------------------------
@@ -1535,21 +1748,21 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     if (dm.cpuMemorySize > 0) {
         if (!m_impl->cpuMem.allocate(static_cast<size_t>(dm.cpuMemorySize),
                                      kDmemTypeOnion, kDmemProt)) {
-            return VideoDecoderResult(VideoDecoderResultCategory::DecoderResourceFailure);
+            return failStart(VideoDecoderResultCategory::DecoderResourceFailure);
         }
         dm.cpuMemory = m_impl->cpuMem.baseAddress;
     }
     if (dm.gpuMemorySize > 0) {
         if (!m_impl->gpuMem.allocate(static_cast<size_t>(dm.gpuMemorySize),
                                      kDmemTypeGarlic, kDmemProt)) {
-            return VideoDecoderResult(VideoDecoderResultCategory::DecoderResourceFailure);
+            return failStart(VideoDecoderResultCategory::DecoderResourceFailure);
         }
         dm.gpuMemory = m_impl->gpuMem.baseAddress;
     }
     if (dm.cpuGpuMemorySize > 0) {
         if (!m_impl->cpuGpuMem.allocate(static_cast<size_t>(dm.cpuGpuMemorySize),
                                         kDmemTypeOnion, kDmemProt)) {
-            return VideoDecoderResult(VideoDecoderResultCategory::DecoderResourceFailure);
+            return failStart(VideoDecoderResultCategory::DecoderResourceFailure);
         }
         dm.cpuGpuMemory = m_impl->cpuGpuMem.baseAddress;
     }
@@ -1565,13 +1778,14 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
                             ~(align - 1);
         const size_t total = need * kFrameBufferCount;
         if (!m_impl->frameBufferMem.allocate(total, kDmemTypeGarlic, kDmemProt)) {
-            return VideoDecoderResult(VideoDecoderResultCategory::DecoderResourceFailure);
+            return failStart(VideoDecoderResultCategory::DecoderResourceFailure);
         }
         for (size_t i = 0; i < kFrameBufferCount; ++i) {
             m_impl->frameBuffers[i].address =
                 static_cast<uint8_t*>(m_impl->frameBufferMem.baseAddress) + i * need;
             m_impl->frameBuffers[i].size = need;
-            m_impl->frameBuffers[i].leased = false;
+            m_impl->frameBuffers[i].inDecoderPipeline = false;
+            m_impl->frameBuffers[i].leased.store(false, std::memory_order_release);
         }
     }
 
@@ -1584,7 +1798,7 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
                  "[video-decoder] CreateDecoder failed: 0x%08X",
                  static_cast<uint32_t>(rc));
         vdDiagPrint(buf);
-        return VideoDecoderResult(VideoDecoderResultCategory::DecoderInitializationFailure, rc);
+        return failStart(VideoDecoderResultCategory::DecoderInitializationFailure, rc);
     }
     m_impl->decoder = dec;
 
@@ -1627,6 +1841,7 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     m_impl->awaitingFirstIdr = true;
     m_impl->haveTimestampBase = false;
     m_impl->rtpTimestampBase = 0;
+    m_impl->oversizeEscalated = false;
     m_impl->firstIdrLogged = false;
     m_impl->firstFrameLogged = false;
     m_impl->firstDecodeResultLogged = false;
@@ -1666,7 +1881,7 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     int prc = pthread_create(&m_impl->workerThread, nullptr, decoderWorker, m_impl);
     if (prc != 0) {
         m_impl->state = VideoDecoderState::Idle;
-        return VideoDecoderResult(VideoDecoderResultCategory::InvalidState, prc);
+        return failStart(VideoDecoderResultCategory::InvalidState, prc);
     }
     m_impl->threadCreated = true;
 
@@ -1729,32 +1944,6 @@ void VideoDecoder::stop() {
     m_impl->clearRetainedAus();
     m_impl->decodeCallSeq = 0;
 
-    // Release the decoder.
-    if (m_impl->decoder && m_impl->api.DeleteDecoder) {
-        m_impl->api.DeleteDecoder(m_impl->decoder);
-    }
-    m_impl->decoder = nullptr;
-
-    // Release the compute queue.
-    if (m_impl->api.queue && m_impl->api.ReleaseComputeQueue) {
-        m_impl->api.ReleaseComputeQueue(m_impl->api.queue);
-    }
-    m_impl->api.queue = nullptr;
-
-    // Release all direct memory.
-    m_impl->frameBufferMem.release();
-    m_impl->cpuGpuMem.release();
-    m_impl->gpuMem.release();
-    m_impl->cpuMem.release();
-    m_impl->computeMem.release();
-
-    // Reset frame buffers.
-    for (size_t i = 0; i < kFrameBufferCount; ++i) {
-        m_impl->frameBuffers[i].address = nullptr;
-        m_impl->frameBuffers[i].size = 0;
-        m_impl->frameBuffers[i].leased = false;
-    }
-
     // Clear the decoded queue (release any outstanding surfaces).
     pthread_mutex_lock(&m_impl->decodedMutex);
     while (!m_impl->decodedQueue.empty()) {
@@ -1762,6 +1951,9 @@ void VideoDecoder::stop() {
         m_impl->decodedQueue.pop_front();
     }
     pthread_mutex_unlock(&m_impl->decodedMutex);
+
+    // Release the decoder, compute queue, direct memory, and reset frame buffers.
+    m_impl->releaseSessionResources();
 
     // Clear the input queue.
     pthread_mutex_lock(&m_impl->inputMutex);

@@ -184,6 +184,8 @@ struct DmemBlock {
 struct GpuVideoRenderer::Impl {
     // --- Lifecycle ----------------------------------------------------------
     bool initialized = false;
+    uint32_t rtWidth = 0;   ///< Output render target width (pixels).
+    uint32_t rtHeight = 0;  ///< Output render target height (pixels).
 
     // --- Direct memory ------------------------------------------------------
     DmemBlock garlicMem;   ///< Shader code + command buffer + constant buffer.
@@ -395,7 +397,12 @@ GpuVideoRenderer::~GpuVideoRenderer() {
 
 GpuVideoResult GpuVideoRenderer::initialize(uint32_t fbWidth, uint32_t fbHeight) {
     if (m_impl->initialized) {
-        return GpuVideoResult();
+        if (m_impl->rtWidth == fbWidth && m_impl->rtHeight == fbHeight) {
+            return GpuVideoResult();
+        }
+        // Output resolution changed across stream sessions: tear down existing
+        // resources and recreate the render target at the new dimensions.
+        shutdown();
     }
     Impl* impl = m_impl;
 
@@ -595,6 +602,8 @@ GpuVideoResult GpuVideoRenderer::initialize(uint32_t fbWidth, uint32_t fbHeight)
     // the GPU may fetch garbage shader code (which can fault reading address 0).
     sceGnmFlushGarlic();
 
+    impl->rtWidth = fbWidth;
+    impl->rtHeight = fbHeight;
     impl->initialized = true;
     gvrDiagPrint("[gpu-video] initialized");
     return GpuVideoResult();
@@ -628,6 +637,7 @@ void GpuVideoRenderer::shutdown() {
     }
     impl->cmdMem = nullptr;
     impl->cbMem = nullptr;
+    impl->eudMem = nullptr;
     impl->eopLabel = nullptr;
 
     impl->garlicMem.release();
@@ -635,6 +645,8 @@ void GpuVideoRenderer::shutdown() {
     impl->overlayMem.release();
     impl->testOverlayMem = nullptr;
 
+    impl->rtWidth = 0;
+    impl->rtHeight = 0;
     impl->initialized = false;
 }
 

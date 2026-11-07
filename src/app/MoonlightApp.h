@@ -963,6 +963,9 @@ private:
     /// Handle an AudioDecodeOutput update emitted by the audio worker.
     void handleAudioDecodeOutputUpdate(const ml::AudioDecodeOutputUpdate& update);
 
+    /// Handle a VideoDecoder update emitted by the video decoder.
+    void handleVideoDecoderUpdate(const ml::VideoDecoderUpdate& update);
+
     /// Present the latest decoded video frame into the current GfxManager
     /// framebuffer. Converts NV12→BGRA entirely on the GPU (fullscreen VS+PS
     /// draw) into the current framebuffer. Called from render() while the
