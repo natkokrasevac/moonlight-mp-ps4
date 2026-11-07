@@ -31,8 +31,13 @@ RUN update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100 && \
     ln -sf clang++-18 /usr/bin/clang++ && \
     ln -sf llvm-ar-18 /usr/bin/ar
 
-# Install libssl1.1 for OpenOrbis .NET Core tools (PkgTool.Core)
-RUN wget -q http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb -O /tmp/libssl1.1.deb && \
+# Install libssl1.1 for OpenOrbis .NET Core tools (PkgTool.Core).
+# Resolve the current libssl1.1 amd64 package from the Ubuntu pool dynamically
+# (falling back to the immutable focal base release package in archive.ubuntu.com)
+# so security point-release rotations do not break the build.
+RUN LIBSSL_DEB=$(curl -fsSL http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/ \
+        | grep -oE 'libssl1\.1_1\.1\.1[^"]*_amd64\.deb' | sort -V | tail -n 1) && \
+    wget -q "http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/${LIBSSL_DEB:-libssl1.1_1.1.1f-1ubuntu2_amd64.deb}" -O /tmp/libssl1.1.deb && \
     dpkg -i /tmp/libssl1.1.deb && \
     rm /tmp/libssl1.1.deb
 

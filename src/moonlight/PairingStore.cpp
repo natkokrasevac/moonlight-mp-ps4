@@ -685,45 +685,72 @@ bool PairingStore::initialize() {
     }
 
     // Check if Moonlight MP already has an identity or trusted hosts.
-    // If not, perform a one-time import from legacy Moonlight DX (/data/moonlight)
-    // so existing pairings and settings carry over seamlessly without re-pairing.
-    FILE* checkId = fopen(kIdentityFilePath, "rb");
-    if (!checkId) {
-        FILE* legacyId = fopen(ml::storage::kLegacyIdentityFilePath, "rb");
-        if (legacyId) {
-            fclose(legacyId);
-            psDiagPrint("[pairingstore] legacy Moonlight DX storage detected; importing to Moonlight MP...");
+    // If neither exists, perform a one-time atomic import from legacy
+    // Moonlight DX (/data/moonlight) so existing pairings and settings carry
+    // over seamlessly without re-pairing or clobbering existing MP files.
+    auto fileExists = [](const char* path) -> bool {
+        FILE* f = fopen(path, "rb");
+        if (!f) return false;
+        fclose(f);
+        return true;
+    };
 
-            auto copyFileHelper = [](const char* src, const char* dst) -> bool {
-                FILE* s = fopen(src, "rb");
-                if (!s) return false;
-                FILE* d = fopen(dst, "wb");
-                if (!d) { fclose(s); return false; }
-                char buf[4096];
-                size_t n = 0;
-                bool ok = true;
-                while ((n = fread(buf, 1, sizeof(buf), s)) > 0) {
-                    if (fwrite(buf, 1, n, d) != n) { ok = false; break; }
-                }
+    if (!fileExists(kIdentityFilePath) && !fileExists(kTrustedHostsFilePath) &&
+        fileExists(ml::storage::kLegacyIdentityFilePath)) {
+        psDiagPrint("[pairingstore] legacy Moonlight DX storage detected; importing to Moonlight MP...");
+
+        auto copyFileAtomicIfMissing = [&fileExists](const char* src, const char* dst) -> bool {
+            if (fileExists(dst)) {
+                return true;
+            }
+            FILE* s = fopen(src, "rb");
+            if (!s) return false;
+            std::string tmpPath = std::string(dst) + ".tmp";
+            FILE* d = fopen(tmpPath.c_str(), "wb");
+            if (!d) {
                 fclose(s);
-                fclose(d);
-                return ok;
-            };
+                return false;
+            }
+            char buf[4096];
+            size_t n = 0;
+            bool ok = true;
+            while ((n = fread(buf, 1, sizeof(buf), s)) > 0) {
+                if (fwrite(buf, 1, n, d) != n) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ferror(s)) {
+                ok = false;
+            }
+            fclose(s);
+            if (fclose(d) != 0) {
+                ok = false;
+            }
+            if (!ok) {
+                remove(tmpPath.c_str());
+                return false;
+            }
+            remove(dst);
+            if (rename(tmpPath.c_str(), dst) != 0) {
+                remove(tmpPath.c_str());
+                return false;
+            }
+            return true;
+        };
 
-            bool idOk = copyFileHelper(ml::storage::kLegacyIdentityFilePath, kIdentityFilePath);
-            bool hostsOk = copyFileHelper(ml::storage::kLegacyTrustedHostsFilePath, kTrustedHostsFilePath);
-            bool settingsOk = copyFileHelper(ml::storage::kLegacySettingsFilePath, ml::storage::kSettingsFilePath);
+        // Import hosts and settings first, then identity last as the commit marker.
+        bool hostsOk = copyFileAtomicIfMissing(ml::storage::kLegacyTrustedHostsFilePath, kTrustedHostsFilePath);
+        bool settingsOk = copyFileAtomicIfMissing(ml::storage::kLegacySettingsFilePath, ml::storage::kSettingsFilePath);
+        bool idOk = copyFileAtomicIfMissing(ml::storage::kLegacyIdentityFilePath, kIdentityFilePath);
 
-            char msg[256];
-            snprintf(msg, sizeof(msg),
-                     "[pairingstore] legacy DX import complete: identity=%s, hosts=%s, settings=%s",
-                     idOk ? "OK" : "SKIP/ERR",
-                     hostsOk ? "OK" : "SKIP/ERR",
-                     settingsOk ? "OK" : "SKIP/ERR");
-            psDiagPrint(msg);
-        }
-    } else {
-        fclose(checkId);
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "[pairingstore] legacy DX import complete: identity=%s, hosts=%s, settings=%s",
+                 idOk ? "OK" : "SKIP/ERR",
+                 hostsOk ? "OK" : "SKIP/ERR",
+                 settingsOk ? "OK" : "SKIP/ERR");
+        psDiagPrint(msg);
     }
 
     m_impl->initialized = true;
