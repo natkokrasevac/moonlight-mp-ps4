@@ -1316,25 +1316,21 @@ void MoonlightApp::pollInput() {
         }
     }
 
-    // Stream-exit chord: Options + L3 held for 1 second while a stream is active.
-    // This is the dedicated stream-exit combination. It stops the stream and
-    // returns to the App List. The chord buttons are NOT forwarded to the
-    // host (ControllerInputStreaming suppresses them via the exit-chord
-    // precedence in its button mapping). Requiring a 1-second hold prevents
-    // accidental stream teardown when tapping Options to pause while sprinting with L3.
+    // Stream-exit chord: Options + L3 held for 1 second on Player 1 while a
+    // stream is active. This is the dedicated stream-exit combination. It
+    // stops the stream and returns to the App List. Requiring a 1-second hold
+    // prevents accidental stream teardown when tapping Options to pause while
+    // sprinting with L3. Pinned to controller 0 to match P1-only chords.
     if (m_streamActive && m_controllerInputStreaming &&
         m_controllerInputStreaming->isActive() && m_input) {
         bool chordHeld = false;
-        for (int i = 0; i < ps4::InputManager::kMaxControllers; ++i) {
-            ps4::ControllerState state;
-            if (m_input->latestControllerState(state, i)) {
-                // ORBIS_PAD_BUTTON_OPTIONS = 0x00000008, ORBIS_PAD_BUTTON_L3 = 0x00000002.
-                const uint32_t kOptions = 0x00000008u;
-                const uint32_t kL3 = 0x00000002u;
-                if ((state.buttons & kOptions) && (state.buttons & kL3)) {
-                    chordHeld = true;
-                    break;
-                }
+        ps4::ControllerState state;
+        if (m_input->latestControllerState(state, 0)) {
+            // ORBIS_PAD_BUTTON_OPTIONS = 0x00000008, ORBIS_PAD_BUTTON_L3 = 0x00000002.
+            const uint32_t kOptions = 0x00000008u;
+            const uint32_t kL3 = 0x00000002u;
+            if ((state.buttons & kOptions) && (state.buttons & kL3)) {
+                chordHeld = true;
             }
         }
 
@@ -1815,9 +1811,6 @@ void MoonlightApp::update(float deltaTime) {
                 if (m_input->isControllerConnected(i)) {
                     controllerMask |= static_cast<uint8_t>(1 << i);
                 }
-            }
-            if (controllerMask == 0) {
-                controllerMask = 1;
             }
             m_ui->setConnectedControllers(controllerMask);
         }
@@ -5484,7 +5477,7 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // Exit stream presentation mode. Release the held frame BEFORE
             // stopping the decoder so no presentation reads freed memory.
             m_streamActive = false;
-    m_exitChordHoldStartUs = 0;
+            m_exitChordHoldStartUs = 0;
             m_streamHostId = 0;
             m_streamAppId = 0;
             m_heldDecodedFrame.release();
@@ -5545,7 +5538,7 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // Exit stream presentation mode. Release the held frame BEFORE
             // stopping the decoder so no presentation reads freed memory.
             m_streamActive = false;
-    m_exitChordHoldStartUs = 0;
+            m_exitChordHoldStartUs = 0;
             m_streamHostId = 0;
             m_streamAppId = 0;
             m_heldDecodedFrame.release();

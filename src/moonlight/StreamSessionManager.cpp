@@ -318,9 +318,8 @@ void ssmClSetMotionEventState(uint16_t controllerNumber, uint8_t motionType,
 void ssmClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b) {
     StreamSessionManager::Impl* owner = ssmGetActiveOwner();
     if (owner && owner->inputManager) {
-        bool isReset = (r == 0 && g == 0 && b == 0);
         owner->inputManager->setLightBar(static_cast<int>(controllerNumber),
-                                         r, g, b, !isReset);
+                                         r, g, b, true);
     }
 }
 

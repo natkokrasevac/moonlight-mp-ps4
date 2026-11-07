@@ -74,6 +74,13 @@ namespace {
 /// Periodic refresh interval in main-loop frames (~1 second at 60 Hz).
 constexpr uint32_t kRefreshIntervalFrames = 60;
 
+/// Duration of a synthesized button pulse (PS/Guide from L1+R1+Options, or
+/// a quick Options tap released before the 1-second exit-chord hold).
+constexpr uint64_t kButtonPulseUs = 80000;   // 80 ms
+
+/// Hold duration for Options + L3 stream exit chord (1 second).
+constexpr uint64_t kExitChordHoldUs = 1000000;
+
 /// Moonlight button flags for the PS4 controls we forward.
 constexpr int kFlagCross   = A_FLAG;      // 0x1000
 constexpr int kFlagCircle  = B_FLAG;      // 0x2000
@@ -146,9 +153,22 @@ struct ControllerInputStreaming::Impl {
         uint64_t releaseUs = 0;
     };
 
+    // --- Exit chord state tracking (Options + L3 on P1) ---------------------
+    // L3 is always forwarded so sprinting is never interrupted. When Options
+    // is pressed while L3 is held on P1, Options is buffered during the 1s
+    // hold window; if released before 1s, an 80 ms Options pulse is sent so
+    // tapping Options while sprinting still pauses the game.
+    struct ExitChordState {
+        enum class Phase { Idle, Buffering, Pulse, Drain };
+        Phase phase = Phase::Idle;
+        uint64_t holdStartUs = 0;
+        uint64_t pulseReleaseUs = 0;
+    };
+
     // --- Per-controller tracking --------------------------------------------
     struct ControllerTrack {
         ps4::ControllerState previousState;
+        int lastSentFlags = 0;
         bool havePreviousState = false;
         uint32_t framesSinceRefresh = 0;
         bool wasConnected = false;
@@ -156,6 +176,7 @@ struct ControllerInputStreaming::Impl {
         bool firstPacketSent = false;
         bool firstPacketLogged = false;
         GuideChordState guideChord;
+        ExitChordState exitChord;
     };
 
     static constexpr int kMaxControllers = ps4::InputManager::kMaxControllers;
@@ -174,6 +195,7 @@ struct ControllerInputStreaming::Impl {
     void resetControllers() {
         for (int i = 0; i < kMaxControllers; ++i) {
             controllers[i].previousState = ps4::ControllerState();
+            controllers[i].lastSentFlags = 0;
             controllers[i].havePreviousState = false;
             controllers[i].framesSinceRefresh = 0;
             controllers[i].wasConnected = false;
@@ -181,6 +203,7 @@ struct ControllerInputStreaming::Impl {
             controllers[i].firstPacketSent = false;
             controllers[i].firstPacketLogged = false;
             controllers[i].guideChord = GuideChordState{};
+            controllers[i].exitChord = ExitChordState{};
         }
     }
 
@@ -237,9 +260,12 @@ struct ControllerInputStreaming::Impl {
     // Only the chord's own components are consumed; unrelated
     // concurrently-held buttons continue to pass through normally.
     static int buildButtonFlags(const ps4::ControllerState& s,
+                                bool isPrimaryController,
                                 bool mouseEmulationActive,
-                                GuideChordState& guide) {
+                                GuideChordState& guide,
+                                ExitChordState& exitState) {
         const uint32_t b = s.buttons;
+        const uint64_t now = static_cast<uint64_t>(sceKernelGetProcessTime());
 
         const bool touchpadPressed = (b & kRawTouchpad) != 0;
         const bool optionsPressed  = (b & kRawOptions) != 0;
@@ -247,10 +273,10 @@ struct ControllerInputStreaming::Impl {
         const bool l1Pressed       = (b & kRawL1) != 0;
         const bool r1Pressed       = (b & kRawR1) != 0;
 
-        // Exit chord (highest priority): Options + L3.
-        const bool exitChord = optionsPressed && l3Pressed;
-        // Mouse-assist toggle chord: Options + TouchPad Click.
-        const bool mouseAssistChord = optionsPressed && touchpadPressed;
+        // Exit chord (Options + L3) and Mouse-assist toggle chord (Options +
+        // TouchPad Click) are P1-only chords.
+        const bool exitChordHeld = isPrimaryController && optionsPressed && l3Pressed;
+        const bool mouseAssistChord = isPrimaryController && optionsPressed && touchpadPressed;
 
         int flags = 0;
         // Cross/Circle are consumed as mouse buttons when mouse emulation is
@@ -269,8 +295,60 @@ struct ControllerInputStreaming::Impl {
         if (l1Pressed) flags |= kFlagL1;               // ORBIS_PAD_BUTTON_L1 → LB
         if (r1Pressed) flags |= kFlagR1;               // ORBIS_PAD_BUTTON_R1 → RB
 
+        // Exit-chord state machine for P1:
+        // L3 is always passed through so sprinting with L3 is not broken.
+        // When Options+L3 are pressed together on P1, buffer Options during the
+        // 1s exit hold window. If Options is released before 1s, emit an 80 ms
+        // Options pulse so tapping Options while sprinting still reaches the host.
+        bool suppressOptionsForExit = false;
+        bool pulseOptionsForExit = false;
+        if (isPrimaryController) {
+            switch (exitState.phase) {
+            case ExitChordState::Phase::Idle:
+                if (exitChordHeld && !mouseAssistChord && !(l1Pressed && r1Pressed)) {
+                    exitState.phase = ExitChordState::Phase::Buffering;
+                    exitState.holdStartUs = now;
+                    suppressOptionsForExit = true;
+                }
+                break;
+            case ExitChordState::Phase::Buffering:
+                if (exitChordHeld) {
+                    suppressOptionsForExit = true;
+                    if (now - exitState.holdStartUs >= kExitChordHoldUs) {
+                        exitState.phase = ExitChordState::Phase::Drain;
+                    }
+                } else if (!optionsPressed) {
+                    // Options was released before the 1s exit threshold: replay
+                    // the buffered Options tap to the host as an 80 ms pulse.
+                    exitState.phase = ExitChordState::Phase::Pulse;
+                    exitState.pulseReleaseUs = now + kButtonPulseUs;
+                    pulseOptionsForExit = true;
+                } else {
+                    // L3 was released while Options is still held: let Options
+                    // pass through normally.
+                    exitState.phase = ExitChordState::Phase::Idle;
+                }
+                break;
+            case ExitChordState::Phase::Pulse:
+                if (now < exitState.pulseReleaseUs) {
+                    pulseOptionsForExit = true;
+                } else {
+                    exitState.phase = ExitChordState::Phase::Idle;
+                }
+                break;
+            case ExitChordState::Phase::Drain:
+            default:
+                suppressOptionsForExit = true;
+                if (!optionsPressed && !l3Pressed) {
+                    exitState.phase = ExitChordState::Phase::Idle;
+                }
+                break;
+            }
+        }
+
         // Options maps directly to Host Options / Start (PLAY_FLAG).
-        if (optionsPressed && !exitChord && !mouseAssistChord) {
+        if ((optionsPressed && !suppressOptionsForExit && !mouseAssistChord) ||
+            pulseOptionsForExit) {
             flags |= kFlagOptions;
         }
 
@@ -279,8 +357,8 @@ struct ControllerInputStreaming::Impl {
             flags |= kFlagBack;
         }
 
-        // L3, unless consumed by the exit chord.
-        if (l3Pressed && !exitChord) {
+        // L3 always passes through so sprinting is uninterrupted.
+        if (l3Pressed) {
             flags |= kFlagL3;
         }
 
@@ -293,12 +371,11 @@ struct ControllerInputStreaming::Impl {
         // Sends an 80 ms Guide pulse, and suppresses L1, R1, and Options until
         // all three chord buttons are fully released.
         const int kChordMask = kFlagL1 | kFlagR1 | kFlagOptions;
-        const bool chordHeld = (flags & kChordMask) == kChordMask;
-        const uint64_t now = static_cast<uint64_t>(sceKernelGetProcessTime());
+        const bool chordHeld = l1Pressed && r1Pressed && optionsPressed;
 
         switch (guide.phase) {
         case GuideChordState::Phase::Idle:
-            if (chordHeld && !touchpadPressed && !exitChord && !mouseAssistChord) {
+            if (chordHeld && !touchpadPressed && !exitChordHeld && !mouseAssistChord) {
                 // Release previously forwarded buttons before pressing Guide.
                 guide.phase = GuideChordState::Phase::Neutral;
                 return flags & ~kChordMask;
@@ -307,7 +384,7 @@ struct ControllerInputStreaming::Impl {
 
         case GuideChordState::Phase::Neutral:
             guide.phase = GuideChordState::Phase::Pulse;
-            guide.releaseUs = now + 80000; // 80 ms pulse
+            guide.releaseUs = now + kButtonPulseUs;
             return (flags & ~kChordMask) | kFlagSpecial;
 
         case GuideChordState::Phase::Pulse:
@@ -333,12 +410,10 @@ struct ControllerInputStreaming::Impl {
     bool sendMultiState(short controllerNumber,
                         uint16_t activeGamepadMask,
                         const ps4::ControllerState& s,
-                        bool mouseEmulationActive) {
+                        int flags) {
         if (!inputReady) {
             return false;
         }
-        int flags = buildButtonFlags(s, mouseEmulationActive,
-                                     controllers[controllerNumber].guideChord);
         int rc = LiSendMultiControllerEvent(controllerNumber,
                                             activeGamepadMask,
                                             flags,
@@ -354,10 +429,19 @@ struct ControllerInputStreaming::Impl {
     }
 
     // --- Helper: send a neutral state for a specific controller slot --------
+    // Bypasses buildButtonFlags() and resets chord state so a disconnect or
+    // stream stop mid-pulse never sends a synthetic button press (e.g. PS/Guide).
     void sendMultiNeutralState(short controllerNumber, uint16_t activeGamepadMask) {
-        ps4::ControllerState neutral;
-        neutral.connected = true;  // neutral is a valid connected state
-        sendMultiState(controllerNumber, activeGamepadMask, neutral, false);
+        if (controllerNumber >= 0 && controllerNumber < kMaxControllers) {
+            controllers[controllerNumber].guideChord = GuideChordState{};
+            controllers[controllerNumber].exitChord = ExitChordState{};
+            controllers[controllerNumber].lastSentFlags = 0;
+        }
+        if (!inputReady) {
+            return;
+        }
+        LiSendMultiControllerEvent(controllerNumber, activeGamepadMask,
+                                   0, 0, 0, 0, 0, 0, 0);
     }
 
     // --- Helper: send neutral states for all currently connected controllers -
@@ -875,11 +959,22 @@ void ControllerInputStreaming::update() {
         }
 
         uint16_t currentMask = m_impl->computeActiveGamepadMask();
-        bool mouseEmulationActive = (i == 0) && m_impl->mouseEmulationEnabled;
+        const bool isPrimary = (i == 0);
+        const bool mouseEmulationActive = isPrimary && m_impl->mouseEmulationEnabled;
 
-        // Change detection
-        bool changed = !track.havePreviousState || isNewConnection;
-        if (track.havePreviousState) {
+        // Evaluate button flags and chord state machines every frame so timed
+        // pulses (L1+R1+Options -> PS/Guide and buffered Options on P1) advance
+        // and terminate on exact frame boundaries even when physical buttons
+        // are held completely still.
+        const int flags = Impl::buildButtonFlags(
+            state, isPrimary, mouseEmulationActive,
+            track.guideChord, track.exitChord);
+
+        // Change detection (includes host-visible button flag transitions from
+        // chord state machines).
+        bool changed = !track.havePreviousState || isNewConnection ||
+                       (flags != track.lastSentFlags);
+        if (track.havePreviousState && !changed) {
             const ps4::ControllerState& p = track.previousState;
             changed = (state.buttons != p.buttons) ||
                       (state.leftStickX != p.leftStickX) ||
@@ -901,8 +996,9 @@ void ControllerInputStreaming::update() {
         }
 
         if (changed || refresh) {
-            m_impl->sendMultiState(static_cast<short>(i), currentMask, state, mouseEmulationActive);
+            m_impl->sendMultiState(static_cast<short>(i), currentMask, state, flags);
             track.previousState = state;
+            track.lastSentFlags = flags;
             track.havePreviousState = true;
 
             if (!track.firstPacketSent) {

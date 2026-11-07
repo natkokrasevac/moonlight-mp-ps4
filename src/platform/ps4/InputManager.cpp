@@ -610,63 +610,66 @@ void InputManager::poll() {
 
     uint32_t combinedButtons = 0;
 
-    for (int i = 0; i < Impl::kSlotCount; ++i) {
-        Impl::PadSlot& slot = m_impl->slots[i];
-        if (slot.padHandle < 0) {
-            continue;
-        }
-
-        OrbisPadData padData;
-        memset(&padData, 0, sizeof(padData));
-
-        int32_t rc = scePadReadState(slot.padHandle, &padData);
-        if (rc != 0) {
-            slot.connected = false;
-            slot.latestState = ControllerState();
-            continue;
-        }
-
-        bool wasConnected = slot.connected;
-        slot.connected = (padData.connected != 0);
-        if (!wasConnected && slot.connected) {
-            if (slot.hasLedOverride) {
-                OrbisPadColor color;
-                color.r = slot.ledR;
-                color.g = slot.ledG;
-                color.b = slot.ledB;
-                color.a = 255;
-                scePadSetLightBar(slot.padHandle, &color);
-            } else {
-                setSlotLightBar(slot.padHandle, i);
+    {
+        std::lock_guard<std::mutex> lock(m_impl->padMutex);
+        for (int i = 0; i < Impl::kSlotCount; ++i) {
+            Impl::PadSlot& slot = m_impl->slots[i];
+            if (slot.padHandle < 0) {
+                continue;
             }
-        } else if (wasConnected && !slot.connected) {
-            OrbisPadVibeParam vibe;
-            vibe.lgMotor = 0;
-            vibe.smMotor = 0;
-            scePadSetVibration(slot.padHandle, &vibe);
-        }
-        ControllerState& s = slot.latestState;
-        s.buttons = padData.buttons;
-        s.leftStickX  = convertAxis(padData.leftStick.x, false);
-        s.leftStickY  = convertAxis(padData.leftStick.y, true);
-        s.rightStickX = convertAxis(padData.rightStick.x, false);
-        s.rightStickY = convertAxis(padData.rightStick.y, true);
-        s.leftTrigger  = padData.analogButtons.l2;
-        s.rightTrigger = padData.analogButtons.r2;
-        s.connected = (padData.connected != 0);
 
-        s.touchActive = (padData.touch.fingers > 0);
-        s.touchFingers = padData.touch.fingers;
-        if (s.touchActive) {
-            s.touchX = static_cast<int16_t>(padData.touch.touch[0].x);
-            s.touchY = static_cast<int16_t>(padData.touch.touch[0].y);
-        } else {
-            s.touchX = 0;
-            s.touchY = 0;
-        }
+            OrbisPadData padData;
+            memset(&padData, 0, sizeof(padData));
 
-        if (slot.connected) {
-            combinedButtons |= padData.buttons;
+            int32_t rc = scePadReadState(slot.padHandle, &padData);
+            if (rc != 0) {
+                slot.connected = false;
+                slot.latestState = ControllerState();
+                continue;
+            }
+
+            bool wasConnected = slot.connected;
+            slot.connected = (padData.connected != 0);
+            if (!wasConnected && slot.connected) {
+                if (slot.hasLedOverride) {
+                    OrbisPadColor color;
+                    color.r = slot.ledR;
+                    color.g = slot.ledG;
+                    color.b = slot.ledB;
+                    color.a = 255;
+                    scePadSetLightBar(slot.padHandle, &color);
+                } else {
+                    setSlotLightBar(slot.padHandle, i);
+                }
+            } else if (wasConnected && !slot.connected) {
+                OrbisPadVibeParam vibe;
+                vibe.lgMotor = 0;
+                vibe.smMotor = 0;
+                scePadSetVibration(slot.padHandle, &vibe);
+            }
+            ControllerState& s = slot.latestState;
+            s.buttons = padData.buttons;
+            s.leftStickX  = convertAxis(padData.leftStick.x, false);
+            s.leftStickY  = convertAxis(padData.leftStick.y, true);
+            s.rightStickX = convertAxis(padData.rightStick.x, false);
+            s.rightStickY = convertAxis(padData.rightStick.y, true);
+            s.leftTrigger  = padData.analogButtons.l2;
+            s.rightTrigger = padData.analogButtons.r2;
+            s.connected = (padData.connected != 0);
+
+            s.touchActive = (padData.touch.fingers > 0);
+            s.touchFingers = padData.touch.fingers;
+            if (s.touchActive) {
+                s.touchX = static_cast<int16_t>(padData.touch.touch[0].x);
+                s.touchY = static_cast<int16_t>(padData.touch.touch[0].y);
+            } else {
+                s.touchX = 0;
+                s.touchY = 0;
+            }
+
+            if (slot.connected) {
+                combinedButtons |= padData.buttons;
+            }
         }
     }
 
