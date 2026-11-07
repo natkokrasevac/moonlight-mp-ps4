@@ -10,7 +10,17 @@
 
 ### 🌟 New in Moonlight MP
 
-- **Multi-Controller & Local Co-Op (MP)**: Connect up to 4 DualShock 4 controllers simultaneously for local multiplayer gaming. Secondary controllers are detected dynamically as users or guest accounts sign in (`sceUserServiceGetLoginUserIdList`).
+- **Multi-Controller & Local Co-Op (MP)**: Connect up to 4 DualShock 4 controllers simultaneously for local multiplayer gaming. Secondary controllers are detected dynamically as users or guest accounts sign in (`sceUserServiceGetLoginUserIdList`). Automatically provisions virtual controllers on the host (`&remoteControllersBitmap=15&gcmap=15`).
+- **250 Hz High-Frequency Input & Motion Engine**: Runs input polling and motion sensor streaming on a dedicated background thread at a 4 ms cadence (250 Hz) for minimal latency and high-frequency gyroscope reports.
+- **Dual-Slot Touchpad Gestures & Smooth Scrolling**:
+  - **1-Finger Drag**: Smooth mouse cursor movement with float sub-pixel accumulators.
+  - **2-Finger Scroll**: Vertical and horizontal high-resolution scrolling (`LiSendHighResScrollEvent`).
+  - **Dual Clicks**: 1-finger click = Left Click, 2-finger click = Right Click (retaining `Cross` and `Circle` as clicks).
+- **Gyroscope & Accelerometer (IMU) Motion Passthrough**: Full 6-axis motion reporting (`vel` and `acell` converted to deg/s and m/s²) with dynamic Sunshine/Steam Input activation via `setMotionEventState`.
+- **DualShock 4 Touchpad & Split Mapping**: In normal gamepad mode, clicking the left half of the touchpad sends Select / Back (`BACK_FLAG`), while the right half sends the native PS4 touchpad button (`TOUCHPAD_FLAG`).
+- **Radial Analog Stick Deadzones**: Configurable radial scaling (0%, 5%, 8% default, 10%, 15%, 20%) in settings eliminates stick drift without step jumps.
+- **Host Face Button Swapping**: In-stream button swap (`Cross` ↔ `Circle`, `Square` ↔ `Triangle`) for Japanese/Nintendo button layouts without affecting PS4 UI navigation.
+- **Automatic Stream Reconnection & Health Feedback**: Automatically reconnects up to 3 times on unexpected connection drops, shows in-stream poor-connection warning banners, and displays live status on game cards.
 - **Live Controller HUD Indicators**: Real-time top-bar indicators show connected vs. standby controllers (1–4) across all menus with native DualShock 4 icons.
 - **Dual-Motor Force Feedback (Rumble)**: Hardware dual-motor vibration (`largeMotor` heavy rumble and `smallMotor` light rumble via `scePadSetVibration`) routed independently to each player slot.
 - **Dynamic In-Game RGB Light Bar Colors**: Real-time game-driven light bar illumination (`clSetControllerLED`), reverting cleanly to player slot colors (P1: **Blue**, P2: **Red**, P3: **Green**, P4: **Magenta**) in menus or on disconnect.
@@ -99,17 +109,38 @@ make
 
 ## Controls
 
+### Navigation & Menus
+
 | Action | Control |
 |---|---|
 | **Navigate UI** | D-Pad / Left Stick |
 | **Select / Enter** | ✕ Cross (or ○ Circle based on console setting) |
 | **Back / Cancel** | ○ Circle (or ✕ Cross based on console setting) |
+| **Open Settings Overlay** | Options (in menus) |
+| **Open Help & Shortcuts** | Touchpad Click (in menus) |
 | **Toggle Hostname / IP** | ▢ Square (in Add Host modal) |
-| **Game Pause / Options** | Options |
-| **Host PS / Guide Button** | `L1 + R1 + Options` |
-| **Host Touchpad / View / Select** | Touchpad Click |
-| **Exit Stream** | Hold `Options + L3` for 1 sec (any controller) |
-| **Toggle Mouse Mode** | `Options + Touchpad Click` (Player 1) |
+
+### In-Stream Controls (Normal Gamepad Mode)
+
+| Action | Control |
+|---|---|
+| **Game Pause / Start** | Options |
+| **Select / View / Back** | Touchpad Click (Left half) |
+| **Native DualShock 4 Touchpad Button** | Touchpad Click (Right half) |
+| **Host PS / Guide Button / Steam Overlay** | `L1 + R1 + Options` |
+| **Exit Stream to Menu** | Hold `Options + L3` for 1 sec (any controller) |
+| **Toggle Mouse Emulation Mode** | `Options + Touchpad Click` (Player 1) |
+
+### Mouse Emulation Controls (when Mouse Mode is ON)
+
+| Action | Control |
+|---|---|
+| **Move Cursor** | 1 finger drag on Touchpad or Left Stick |
+| **Left Click** | 1-finger Touchpad click or ✕ Cross |
+| **Right Click** | 2-finger Touchpad click or ○ Circle |
+| **Middle Click** | R3 (Right stick click) |
+| **Scroll (Vertical & Horizontal)** | Drag 2 fingers on Touchpad |
+| **Accelerate Cursor** | Hold R2 while moving |
 
 ---
 

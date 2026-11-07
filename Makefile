@@ -21,8 +21,6 @@ endif
 
 # File naming
 PKG_NAME := $(PROJECT_NAME)_$(VERSION)
-ZIP_NAME := $(PKG_NAME).zip
-SHA_NAME := $(PKG_NAME)_sha256.txt
 
 SRCS        := $(shell find $(SRC_DIR) \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \))
 
@@ -47,17 +45,12 @@ endif
 TOOLCHAIN_FILE := cmake/toolchain-ps4-$(CDIR).cmake
 TOOLS_DIR    := $(OO_PS4_TOOLCHAIN)/bin/$(CDIR)
 
-.PHONY: all clean ftp zip pkg
+.PHONY: all clean ftp pkg
 
 # Default target: build the pkg only (no FTP upload)
 all: $(PKG_NAME).pkg
 
 pkg: $(PKG_NAME).pkg
-
-# Zip target: build the pkg if needed, then create a zip archive and checksum
-zip: $(PKG_NAME).pkg
-	zip $(ZIP_NAME) $(PKG_NAME).pkg LICENSE CHANGELOG README-moonlight-dx.txt
-	shasum -a 256 $(ZIP_NAME) > $(SHA_NAME)
 
 # FTP upload target: build the pkg if needed, then upload it
 ftp: $(PKG_NAME).pkg
@@ -96,6 +89,6 @@ $(BUILD_DIR)/$(PKG_NAME).elf: $(SRCS) CMakeLists.txt
 	cmake --build $(BUILD_DIR)
 
 clean:
-	rm -rf $(BUILD_DIR) eboot.bin $(PKG_NAME).pkg $(ZIP_NAME) $(SHA_NAME) pkg.gp4 $(PKG_DIR)/sce_sys/param.sfo $(PKG_DIR)/eboot.bin $(PKG_DIR)/pkg.gp4
+	rm -rf $(BUILD_DIR) eboot.bin $(PKG_NAME).pkg pkg.gp4 $(PKG_DIR)/sce_sys/param.sfo $(PKG_DIR)/eboot.bin $(PKG_DIR)/pkg.gp4
 
 
