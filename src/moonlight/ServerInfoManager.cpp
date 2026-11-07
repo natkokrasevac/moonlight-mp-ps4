@@ -255,8 +255,11 @@ bool parseServerInfo(const std::vector<uint8_t>& body, ServerInfo& outInfo) {
         return false;
     }
 
-    // appversion is useful for diagnostics.
-    extractXmlTag(body.data(), body.size(), "appversion", appVersion);
+    // appversion is required by LiStartConnection() for protocol negotiation.
+    if (!extractXmlTag(body.data(), body.size(), "appversion", appVersion) ||
+        appVersion.empty()) {
+        return false;
+    }
     if (appVersion.size() > kMaxServerVersionLen) {
         return false;
     }
@@ -280,16 +283,16 @@ bool parseServerInfo(const std::vector<uint8_t>& body, ServerInfo& outInfo) {
         return false;
     }
 
-    // ServerCodecModeSupport is optional but required for stream connection.
-    // It is a hex value (e.g., "0x00000001" for H.264 only).
+    // ServerCodecModeSupport is optional in older/minimal serverinfo responses
+    // (defaults to 0x00000001 = SCM_H264 when omitted or zero).
     std::string codecModeText;
-    int serverCodecModeSupport = 0;
+    int serverCodecModeSupport = 0x00000001;
     if (extractXmlTag(body.data(), body.size(), "ServerCodecModeSupport", codecModeText) &&
         !codecModeText.empty()) {
         // Parse as hex (strtoul with base 0 handles 0x prefix).
         char* endPtr = nullptr;
         long val = strtol(codecModeText.c_str(), &endPtr, 0);
-        if (endPtr != codecModeText.c_str() && *endPtr == '\0' && val >= 0) {
+        if (endPtr != codecModeText.c_str() && *endPtr == '\0' && val > 0) {
             serverCodecModeSupport = static_cast<int>(val);
         }
     }

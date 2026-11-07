@@ -129,15 +129,20 @@ static bool isValidPort(const std::string& text, uint16_t& outPort) {
 
 /// Validate a hostname (RFC 1123 / standard FQDN or hostname label).
 /// Also returns true if the text is a valid numeric IPv4.
-static bool isValidHostname(const std::string& text) {
-    if (text.empty() || text.size() > 253) {
+static bool isValidHostname(const std::string& rawText) {
+    if (rawText.empty() || rawText.size() > 253) {
         return false;
+    }
+    std::string text = rawText;
+    if (text.size() > 1 && text.back() == '.') {
+        text.pop_back();
     }
     if (isValidIpv4(text)) {
         return true;
     }
+    bool lastLabelAllDigits = true;
     size_t start = 0;
-    while (start < text.size()) {
+    while (start <= text.size()) {
         size_t end = text.find('.', start);
         if (end == std::string::npos) {
             end = text.size();
@@ -149,8 +154,12 @@ static bool isValidHostname(const std::string& text) {
         if (text[start] == '-' || text[end - 1] == '-') {
             return false;
         }
+        bool allDigits = true;
         for (size_t i = start; i < end; ++i) {
             char c = text[i];
+            if (c < '0' || c > '9') {
+                allDigits = false;
+            }
             if (!((c >= 'a' && c <= 'z') ||
                   (c >= 'A' && c <= 'Z') ||
                   (c >= '0' && c <= '9') ||
@@ -158,9 +167,15 @@ static bool isValidHostname(const std::string& text) {
                 return false;
             }
         }
+        lastLabelAllDigits = allDigits;
+        if (end == text.size()) {
+            break;
+        }
         start = end + 1;
     }
-    return true;
+    // Per RFC 1123 / DNS rules, the final label (or single label) of a
+    // non-IPv4 hostname must not be all-numeric (rejects e.g. "999.1.1.1").
+    return !lastLabelAllDigits;
 }
 
 /// Validate the Add Host form.
@@ -1388,6 +1403,9 @@ bool UiManager::getAddHostImeRequest(bool& isPort, bool& isHostname, std::string
         isPort = false;
         isHostname = m_impl->addHostIsHostname;
         initialText = m_impl->addHostIpText;
+        if (!isHostname && initialText.size() > 15) {
+            initialText.resize(15);
+        }
     }
     return true;
 }
@@ -1423,6 +1441,9 @@ void UiManager::setAddHostImeResult(bool accepted, const std::string& text) {
                     cleanedText = text.substr(0, colonPos);
                 }
             }
+        }
+        if (m_impl->addHostIsHostname && cleanedText.size() > 1 && cleanedText.back() == '.') {
+            cleanedText.pop_back();
         }
         m_impl->addHostIpText = cleanedText;
     } else if (m_impl->addHostSelected == Impl::AddHostField::Port) {
@@ -1614,18 +1635,36 @@ void UiManager::processInput(const UiInput& input) {
                 m_impl->addHostSelected = Impl::AddHostField::Cancel;
             }
         }
+        auto toggleAddHostMode = [this]() {
+            m_impl->addHostIsHostname = !m_impl->addHostIsHostname;
+            m_impl->addHostValidationError.clear();
+            if (!m_impl->addHostIsHostname) {
+                // Switching back to numeric IPv4 mode: if the current text
+                // exceeds the 15-char IPv4 OSK limit or contains non-IPv4
+                // characters, reset it so the numeric OSK opens cleanly.
+                bool validChars = (m_impl->addHostIpText.size() <= 15);
+                for (char c : m_impl->addHostIpText) {
+                    if ((c < '0' || c > '9') && c != '.') {
+                        validChars = false;
+                        break;
+                    }
+                }
+                if (!validChars) {
+                    m_impl->addHostIpText = m_impl->localIpAddress;
+                }
+            }
+        };
+
         if (input.leftPressed) {
             if (m_impl->addHostSelected == Impl::AddHostField::EntryType) {
-                m_impl->addHostIsHostname = !m_impl->addHostIsHostname;
-                m_impl->addHostValidationError.clear();
+                toggleAddHostMode();
             } else if (m_impl->addHostSelected == Impl::AddHostField::Add) {
                 m_impl->addHostSelected = Impl::AddHostField::Cancel;
             }
         }
         if (input.rightPressed) {
             if (m_impl->addHostSelected == Impl::AddHostField::EntryType) {
-                m_impl->addHostIsHostname = !m_impl->addHostIsHostname;
-                m_impl->addHostValidationError.clear();
+                toggleAddHostMode();
             } else if (m_impl->addHostSelected == Impl::AddHostField::Cancel) {
                 m_impl->addHostSelected = Impl::AddHostField::Add;
             }
@@ -1637,8 +1676,7 @@ void UiManager::processInput(const UiInput& input) {
         if (input.acceptPressed) {
             switch (m_impl->addHostSelected) {
             case Impl::AddHostField::EntryType:
-                m_impl->addHostIsHostname = !m_impl->addHostIsHostname;
-                m_impl->addHostValidationError.clear();
+                toggleAddHostMode();
                 m_impl->pendingSoundIntent = UiSoundIntent::Cursor;
                 break;
             case Impl::AddHostField::Address:

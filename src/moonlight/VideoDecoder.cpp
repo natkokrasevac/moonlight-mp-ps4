@@ -297,10 +297,9 @@ constexpr int32_t kDmemProt = ORBIS_KERNEL_PROT_CPU_RW | ORBIS_KERNEL_PROT_GPU_A
 /// at depth > 1.
 constexpr uint32_t kDecodePipelineDepth = 4;
 
-/// Maximum consecutive P-frames discarded while in WaitingForIdr before
-/// attempting decode anyway (prevents permanent black screen when streaming
-/// from hosts that do not support on-demand IDR generation, e.g. PS5 Avcap2).
-constexpr uint32_t kMaxWaitingIdrDrops = 30;
+/// Number of consecutive P-frames discarded while in WaitingForIdr before
+/// re-requesting an IDR keyframe from the host (~1 second at 60 fps).
+constexpr uint32_t kMaxWaitingIdrDrops = 60;
 
 } // namespace
 
@@ -1074,29 +1073,26 @@ void* VideoDecoder::decoderWorker(void* arg) {
 
         // --- WaitingForIdr handling -----------------------------------------
         if (impl->state.load() == VideoDecoderState::WaitingForIdr) {
-            if (unit.frameType == 1 /* FRAME_TYPE_IDR */) {
-                // This is an IDR frame — submit it to recover.
-                impl->state = VideoDecoderState::Running;
-                impl->waitingIdrDropCount = 0;
-                {
-                    VideoDecoderUpdate update;
-                    update.type = VideoDecoderUpdateType::Recovered;
-                    update.result = VideoDecoderResultCategory::Success;
-                    impl->pushUpdate(update);
-                }
-            } else {
+            if (unit.frameType != 1 /* FRAME_TYPE_IDR */) {
                 impl->waitingIdrDropCount++;
                 if (impl->waitingIdrDropCount >= kMaxWaitingIdrDrops) {
-                    // Host may not support on-demand IDRs (e.g. PS5 Avcap2).
-                    // Fall back to attempting decode rather than permanently staying black.
-                    vdDiagPrint("[video] WaitingForIdr timeout; attempting decode on incoming frames");
-                    impl->state = VideoDecoderState::Running;
                     impl->waitingIdrDropCount = 0;
-                } else {
-                    // Discard P-frame while waiting for IDR.
-                    impl->encodedConsumed.fetch_add(1);
-                    continue;
+                    LiRequestIdrFrame();
+                    impl->idrRequests.fetch_add(1);
                 }
+                // Discard P-frame while waiting for IDR so unreferenced frames
+                // do not produce garbled output or repeated decode-error loops.
+                impl->encodedConsumed.fetch_add(1);
+                continue;
+            }
+            // This is an IDR frame — submit it to recover.
+            impl->state = VideoDecoderState::Running;
+            impl->waitingIdrDropCount = 0;
+            {
+                VideoDecoderUpdate update;
+                update.type = VideoDecoderUpdateType::Recovered;
+                update.result = VideoDecoderResultCategory::Success;
+                impl->pushUpdate(update);
             }
         }
 

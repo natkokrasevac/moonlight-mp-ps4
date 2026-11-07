@@ -69,6 +69,46 @@ constexpr size_t kMaxAddressesPerHost = 4;
 /// Rate-limit interval for capacity diagnostics (ms).
 constexpr uint64_t kCapacityLogIntervalMs = 10000;
 
+/// Returns true if `text` is a valid dotted-decimal IPv4 address (four octets
+/// 0..255). Used so numeric IPv4 manual targets do not populate `Host::hostname`.
+bool isNumericIpv4(const std::string& text) {
+    if (text.size() < 7 || text.size() > 15) {
+        return false;
+    }
+    int octets = 0;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t dot = text.find('.', start);
+        if (dot == std::string::npos) {
+            dot = text.size();
+        }
+        size_t len = dot - start;
+        if (len == 0 || len > 3) {
+            return false;
+        }
+        if (len > 1 && text[start] == '0') {
+            return false;
+        }
+        int val = 0;
+        for (size_t i = start; i < dot; ++i) {
+            char c = text[i];
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            val = val * 10 + (c - '0');
+        }
+        if (val > 255) {
+            return false;
+        }
+        ++octets;
+        if (dot == text.size()) {
+            break;
+        }
+        start = dot + 1;
+    }
+    return octets == 4;
+}
+
 } // namespace
 
 namespace ml {
@@ -449,21 +489,18 @@ HostId HostManager::addManualHost(const std::string& ipv4, uint16_t port,
         return 0;
     }
 
-    // --- Duplicate suppression by numeric IPv4 and port ---------------------
-    // If an existing host already has this numeric IPv4 address and matching
-    // port, return it instead of creating a duplicate card. This is safe
-    // because the (IPv4, port) tuple is the bootstrap identity for a manual
-    // host.
-    const uint16_t reqPort = (port != 0) ? port : 47989;
+    // --- Duplicate suppression by numeric IPv4/hostname and port ------------
+    // If an existing host already has this address/hostname and matching
+    // port, return it instead of creating a duplicate card.
     for (const Host& h : m_hosts) {
         const uint16_t hPort = (h.port != 0) ? h.port : 47989;
-        if (hPort == reqPort) {
+        if (hPort == port) {
             if (!h.hostname.empty() && h.hostname == ipv4) {
                 char buf[256];
                 snprintf(buf, sizeof(buf),
                          "[host] manual add matched existing host id=%llu by hostname '%s:%u'",
                          static_cast<unsigned long long>(h.id), ipv4.c_str(),
-                         static_cast<unsigned>(reqPort));
+                         static_cast<unsigned>(port));
                 hostDiagPrint(buf);
                 return h.id;
             }
@@ -473,7 +510,7 @@ HostId HostManager::addManualHost(const std::string& ipv4, uint16_t port,
                     snprintf(buf, sizeof(buf),
                              "[host] manual add matched existing host id=%llu by address '%s:%u'",
                              static_cast<unsigned long long>(h.id), ipv4.c_str(),
-                             static_cast<unsigned>(reqPort));
+                             static_cast<unsigned>(port));
                     hostDiagPrint(buf);
                     return h.id;
                 }
@@ -491,9 +528,13 @@ HostId HostManager::addManualHost(const std::string& ipv4, uint16_t port,
     Host host;
     host.id = m_nextHostId++;
     // Display-name fallback: the address/hostname until serverinfo provides a
-    // Sunshine display name.
+    // Sunshine display name. Only set `hostname` when the target is an actual
+    // hostname (not a dotted IPv4 address), so numeric IPs do not pollute
+    // FQDN/hostname correlation on restore or mDNS discovery.
     host.displayName = ipv4;
-    host.hostname = ipv4;
+    if (!isNumericIpv4(ipv4)) {
+        host.hostname = ipv4;
+    }
     host.port = port;
     host.lastSeenMs = nowMs;
     // A manually-added host is a live manual target (not mDNS-discovered) and
