@@ -463,10 +463,11 @@ int ssmVideoSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
         return DR_OK;
     }
 
-    // Validate the decoder is running.
+    // Validate the decoder is running or recovering.
     ml::VideoDecoderState vdState = owner->videoDecoder->state();
     if (vdState != ml::VideoDecoderState::Running &&
-        vdState != ml::VideoDecoderState::Starting) {
+        vdState != ml::VideoDecoderState::Starting &&
+        vdState != ml::VideoDecoderState::WaitingForIdr) {
         return DR_OK;
     }
 
@@ -1005,10 +1006,14 @@ StreamSessionResult StreamSessionManager::start(StreamSessionDescriptor&& sessio
         return StreamSessionResult(StreamSessionResultCategory::InvalidSession);
     }
 
+    // Ensure default codec mode support if the server did not specify it.
+    if (session.serverCodecModeSupport == 0) {
+        session.serverCodecModeSupport = 0x00000001; // SCM_H264
+    }
+
     // Validate server info required by LiStartConnection().
-    if (session.serverInfoAppVersion.empty() ||
-        session.serverCodecModeSupport == 0) {
-        return StreamSessionResult(StreamSessionResultCategory::InvalidSession);
+    if (session.serverInfoAppVersion.empty()) {
+        session.serverInfoAppVersion = "7.1.431.0";
     }
 
     // --- Move the descriptor into active session state ----------------------

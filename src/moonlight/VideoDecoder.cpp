@@ -1820,9 +1820,11 @@ bool VideoDecoder::pushEncodedUnit(EncodedVideoUnit&& unit) {
         return false;
     }
 
-    // Reject if not running.
+    // Reject if not running or recovering.
     VideoDecoderState s = m_impl->state.load();
-    if (s != VideoDecoderState::Running && s != VideoDecoderState::Starting) {
+    if (s != VideoDecoderState::Running &&
+        s != VideoDecoderState::Starting &&
+        s != VideoDecoderState::WaitingForIdr) {
         return false;
     }
 
