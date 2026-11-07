@@ -1,3 +1,14 @@
+V3.00 - 2026-11-07
+	Implement 250 Hz high-frequency controller input and motion streaming on a dedicated background thread
+	Add multi-touch touchpad gestures: 1-finger sub-pixel cursor movement, 2-finger vertical and horizontal scrolling, and dual-finger clicks
+	Support gyroscope and accelerometer (IMU) motion sensor passthrough with automatic rad/s to deg/s and m/s^2 conversion
+	Add native DualShock 4 touchpad click button (TOUCHPAD_FLAG) and split touchpad click (Left half = Select, Right half = Touchpad)
+	Add radial stick deadzone scaling (0%, 5%, 8%, 10%, 15%, 20%) to eliminate stick drift without step jumps
+	Add host face button swap (Cross <-> Circle, Square <-> Triangle) option while preserving local PS4 UI navigation
+	Add new GAMEPAD section in Settings overlay with persistent INI configuration
+	Pass active multi-controller bitmap (15 / 0x0F) in /launch and /resume query strings for proper virtual gamepad provisioning
+	Expand built-in Help page with complete in-stream shortcuts, touchpad gestures, and hardware passthrough guide
+
 V2.80 - 2026-11-07
 	Automatically attempt up to 3 stream reconnects (with 2s backoff and serverinfo refresh) on unexpected connection drops
 	Forward CONN_STATUS_POOR / CONN_STATUS_OKAY callbacks and render an in-stream Poor Connection warning banner
