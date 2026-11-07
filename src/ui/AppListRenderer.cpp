@@ -399,7 +399,7 @@ void AppListRenderer::drawCard(const AppListCardRenderData& card, int index,
     const float statusY = nameBaseline - 40.0f * scale;
 
     const char* statusText = nullptr;
-    if (card.quitting && !card.quitStatusText.empty()) {
+    if (!card.quitStatusText.empty()) {
         statusText = card.quitStatusText.c_str();
     } else if (card.waitingToLaunch) {
         statusText = "Pending...";

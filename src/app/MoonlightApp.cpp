@@ -1775,6 +1775,10 @@ void MoonlightApp::update(float deltaTime) {
     //     externally-triggered launch/quit/switch changes are reflected.
     updateAppListPolling();
 
+    // 2c1. Drive automatic stream reconnect when a stream terminated
+    //      unexpectedly and is awaiting its backoff timer / serverinfo refresh.
+    updateStreamReconnect();
+
     // 2c2. Continue artwork scheduling for the current catalog. While
     //      scheduling is active, schedule a bounded batch of artwork requests
     //      each frame (stopping on QueueFull and resuming later). This keeps
@@ -2983,6 +2987,14 @@ bool MoonlightApp::presentStreamVideoFrame() {
     // Diagnostic: log the first presented frame.
     if (!m_streamFirstFramePresented) {
         m_streamFirstFramePresented = true;
+        // Once the first video frame has been presented, the stream is healthy
+        // and any prior auto-reconnect sequence has succeeded. Reset the
+        // reconnect retry counter so a future network drop gets a fresh budget.
+        m_reconnecting = false;
+        m_reconnectHostId = 0;
+        m_reconnectAppId = 0;
+        m_reconnectDeadlineUs = 0;
+        m_reconnectAttempts = 0;
         char buf[128];
         snprintf(buf, sizeof(buf),
                  "[video] first frame presented (frame=%llu %ux%u)",
@@ -3099,18 +3111,20 @@ void MoonlightApp::prepareStreamOverlay() {
     }
     if (mouseActive) {
         if (mouseState.visible != m_prevOverlayMouse.visible ||
-            mouseState.enabled != m_prevOverlayMouse.enabled) {
+            mouseState.enabled != m_prevOverlayMouse.enabled ||
+            mouseState.poorConnection != m_prevOverlayMouse.poorConnection) {
             changed = true;
-            char buf[128];
+            char buf[144];
             snprintf(buf, sizeof(buf),
-                     "[overlay] mouse overlay active: visible=%d enabled=%d (re-render)",
-                     mouseState.visible ? 1 : 0, mouseState.enabled ? 1 : 0);
+                     "[overlay] mouse/status overlay active: visible=%d enabled=%d poor=%d (re-render)",
+                     mouseState.visible ? 1 : 0, mouseState.enabled ? 1 : 0,
+                     mouseState.poorConnection ? 1 : 0);
             diagPrint(buf);
         }
-    } else if (m_prevOverlayMouse.visible) {
-        // The mouse-emulation overlay disappeared.
+    } else if (m_prevOverlayMouse.visible || m_prevOverlayMouse.poorConnection) {
+        // The mouse-emulation / poor-connection overlay disappeared.
         changed = true;
-        diagPrint("[overlay] mouse overlay expired (re-render)");
+        diagPrint("[overlay] mouse/status overlay expired (re-render)");
     }
 
     // --- Re-render the overlay into the overlay compositor only on change ---
@@ -3153,7 +3167,7 @@ void MoonlightApp::prepareStreamOverlay() {
         } else if (m_prevOverlayScreen == ui::UiScreen::StreamStatistics) {
             clearOverlayRegion(m_streamStatisticsRenderer->bounds());
         }
-        if (m_prevOverlayMouse.visible) {
+        if (m_prevOverlayMouse.visible || m_prevOverlayMouse.poorConnection) {
             clearOverlayRegion(m_mouseEmulationOverlayRenderer->bounds());
         }
         if (baseActive && screen == ui::UiScreen::StreamExitHint) {
@@ -3473,14 +3487,19 @@ void MoonlightApp::handleUiIntent(const ui::UiIntent& intent) {
         break;
     case ui::UiIntentType::Back:
         diagPrint("[app] intent: Back");
-        // If a launch/resume is active, cancel it.
-        if (m_applicationSessionManager && m_applicationSessionManager->isLaunching()) {
-            m_applicationSessionManager->cancel();
+        // If a launch/resume or auto-reconnect is active, cancel it.
+        if ((m_applicationSessionManager && m_applicationSessionManager->isLaunching()) ||
+            m_reconnecting) {
+            if (m_applicationSessionManager && m_applicationSessionManager->isLaunching()) {
+                m_applicationSessionManager->cancel();
+            }
             m_launchActive = false;
-            // The launch was cancelled before the stream was established.
-            // Clear the transient Connecting state so the App List returns to
-            // the normal Host.currentGame-derived presentation.
+            cancelStreamReconnect("");
+            // The launch/reconnect was cancelled before the stream was
+            // established. Clear the transient Connecting state so the App
+            // List returns to the normal Host.currentGame-derived presentation.
             clearConnectingState();
+            refreshAppListView();
             // Remain on App List; the launch result (if any) will be handled
             // by handleApplicationLaunchUpdate.
             break;
@@ -3489,6 +3508,7 @@ void MoonlightApp::handleUiIntent(const ui::UiIntent& intent) {
         if (m_applicationCatalog && m_applicationCatalog->isLoading()) {
             m_applicationCatalog->cancel();
         }
+        cancelStreamReconnect("");
         // Clear the current catalog state.
         m_catalogHostId = 0;
         m_catalogGeneration = 0;
@@ -3503,14 +3523,17 @@ void MoonlightApp::handleUiIntent(const ui::UiIntent& intent) {
         break;
     case ui::UiIntentType::ActivateApplication:
         diagPrint("[app] intent: ActivateApplication");
+        cancelStreamReconnect("");
         handleActivateApplication(intent.hostId, intent.applicationId);
         break;
     case ui::UiIntentType::QuitApplication:
         diagPrint("[app] intent: QuitApplication");
+        cancelStreamReconnect("");
         handleQuitApplication(intent.hostId, intent.applicationId);
         break;
     case ui::UiIntentType::QuitAndLaunchApplication:
         diagPrint("[app] intent: QuitAndLaunchApplication");
+        cancelStreamReconnect("");
         handleQuitAndLaunchApplication(intent.hostId, intent.applicationId,
                                        intent.launchApplicationId);
         break;
@@ -3726,6 +3749,9 @@ void MoonlightApp::handleDeleteHost(ml::HostId hostId) {
     if (m_pendingPairingAutoOpenHostId == hostId) {
         m_pendingPairingAutoOpenHostId = 0;
     }
+    if (m_reconnectHostId == hostId) {
+        cancelStreamReconnect("");
+    }
 
     // Clear any stale serverinfo generation tracking for the removed host.
     for (auto it = m_serverInfoGenerations.begin();
@@ -3836,6 +3862,7 @@ void MoonlightApp::handleResetMoonlight() {
     m_pendingPairingAutoOpenHostId = 0;
     m_pendingManualAddHostId = 0;
     m_pendingManualAddWasExisting = false;
+    cancelStreamReconnect("");
     m_serverInfoGenerations.clear();
     m_probeInFlightHosts.clear();
     m_prevHostAvailability.clear();
@@ -4021,6 +4048,9 @@ void MoonlightApp::handleServerSideUnpair(ml::HostId hostId) {
     if (m_pendingPairingAutoOpenHostId == hostId) {
         m_pendingPairingAutoOpenHostId = 0;
     }
+    if (m_reconnectHostId == hostId) {
+        cancelStreamReconnect("");
+    }
 
     // The centralized App List guard (leaveAppListIfHostUnpaired) runs each
     // frame from update() and will back out to the Host List if the user is on
@@ -4073,6 +4103,7 @@ void MoonlightApp::leaveAppListIfHostUnpaired() {
     }
 
     // Clear the current catalog state.
+    cancelStreamReconnect("");
     m_catalogHostId = 0;
     m_catalogGeneration = 0;
     m_catalogApplications.clear();
@@ -4939,9 +4970,17 @@ void MoonlightApp::handleActivateApplication(ml::HostId hostId,
         view.state = (host->currentGame == appId)
                          ? ui::LaunchPresentationState::Resuming
                          : ui::LaunchPresentationState::Launching;
-        view.statusText = (host->currentGame == appId)
-                              ? "Resuming " + app->name + "..."
-                              : "Launching " + app->name + "...";
+        if (m_reconnecting) {
+            char statusBuf[64];
+            snprintf(statusBuf, sizeof(statusBuf), "Reconnecting (%u/%u)...",
+                     static_cast<unsigned>(m_reconnectAttempts),
+                     static_cast<unsigned>(kMaxStreamReconnectAttempts));
+            view.statusText = statusBuf;
+        } else {
+            view.statusText = (host->currentGame == appId)
+                                  ? "Resuming " + app->name + "..."
+                                  : "Launching " + app->name + "...";
+        }
         m_ui->setApplicationLaunchView(view);
     }
 
@@ -5010,6 +5049,20 @@ void MoonlightApp::handleApplicationLaunchUpdate(
                  static_cast<unsigned>(update.applicationId),
                  static_cast<int>(update.result.category));
         diagPrint(buf);
+
+        // If an automatic stream reconnect was in progress and the launch was
+        // not cancelled by the user, schedule the next reconnect attempt (or
+        // fail with "Connection lost" if retries are exhausted).
+        if (m_reconnecting &&
+            update.result.category != ml::ApplicationLaunchResultCategory::Cancelled) {
+            scheduleOrFailStreamReconnect(update.hostId, update.applicationId);
+            return;
+        }
+        m_reconnecting = false;
+        m_reconnectHostId = 0;
+        m_reconnectAppId = 0;
+        m_reconnectDeadlineUs = 0;
+        m_reconnectAttempts = 0;
     }
 
     // --- Update the UI ------------------------------------------------------
@@ -5019,17 +5072,26 @@ void MoonlightApp::handleApplicationLaunchUpdate(
         view.applicationId = update.applicationId;
         if (update.valid) {
             view.state = ui::LaunchPresentationState::Succeeded;
-            view.statusText = "Launched";
+            if (m_reconnecting) {
+                char statusBuf[64];
+                snprintf(statusBuf, sizeof(statusBuf), "Reconnecting (%u/%u)...",
+                         static_cast<unsigned>(m_reconnectAttempts),
+                         static_cast<unsigned>(kMaxStreamReconnectAttempts));
+                view.statusText = statusBuf;
+            } else {
+                view.statusText = "Launched";
+            }
         } else if (update.result.category ==
                    ml::ApplicationLaunchResultCategory::Cancelled) {
             view.state = ui::LaunchPresentationState::Cancelled;
             view.statusText = "Launch cancelled";
         } else {
             view.state = ui::LaunchPresentationState::Failed;
-            view.statusText = "Unable to launch application";
+            view.statusText = "Launch failed";
         }
         m_ui->setApplicationLaunchView(view);
     }
+    refreshAppListView();
 }
 
 /// Handle a QuitApplication intent.
@@ -5466,6 +5528,16 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
     case ml::StreamSessionUpdateType::Interrupted:
         diagPrint("[stream] update: interrupted");
         break;
+    case ml::StreamSessionUpdateType::ConnectionStatusPoor:
+        if (m_ui && m_ui->isInitialized()) {
+            m_ui->setStreamConnectionPoor(true);
+        }
+        break;
+    case ml::StreamSessionUpdateType::ConnectionStatusOkay:
+        if (m_ui && m_ui->isInitialized()) {
+            m_ui->setStreamConnectionPoor(false);
+        }
+        break;
     case ml::StreamSessionUpdateType::Terminated:
         {
             char buf[128];
@@ -5485,6 +5557,10 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // stopping the decoder so no presentation reads freed memory.
             m_streamActive = false;
             m_exitChordHoldStartUs = 0;
+            const ml::HostId terminatedHostId =
+                (m_streamHostId != 0) ? m_streamHostId : update.hostId;
+            const ml::ApplicationId terminatedAppId =
+                (m_streamAppId != 0) ? m_streamAppId : update.applicationId;
             m_streamHostId = 0;
             m_streamAppId = 0;
             m_heldDecodedFrame.release();
@@ -5523,7 +5599,20 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // streaming, so it must be fully redrawn).
             m_prevAppListValid = false;
             m_prevAppGridValid = false;
-            refreshAppListView();
+
+            // If the termination was unexpected (non-zero error code, i.e. not
+            // ML_ERROR_GRACEFUL_TERMINATION), automatically attempt to
+            // reconnect to the running remote application.
+            if (update.nativeError != 0 &&
+                terminatedHostId != 0 && terminatedAppId != 0) {
+                scheduleOrFailStreamReconnect(terminatedHostId, terminatedAppId);
+            } else {
+                cancelStreamReconnect("");
+                refreshAppListView();
+                if (terminatedHostId != 0) {
+                    scheduleServerInfoQuery(terminatedHostId);
+                }
+            }
         }
         break;
     case ml::StreamSessionUpdateType::Failed:
@@ -5546,6 +5635,10 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // stopping the decoder so no presentation reads freed memory.
             m_streamActive = false;
             m_exitChordHoldStartUs = 0;
+            const ml::HostId failedHostId =
+                (m_streamHostId != 0) ? m_streamHostId : update.hostId;
+            const ml::ApplicationId failedAppId =
+                (m_streamAppId != 0) ? m_streamAppId : update.applicationId;
             m_streamHostId = 0;
             m_streamAppId = 0;
             m_heldDecodedFrame.release();
@@ -5580,7 +5673,21 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             // full recompose.
             m_prevAppListValid = false;
             m_prevAppGridValid = false;
-            refreshAppListView();
+
+            if (m_reconnecting && failedHostId != 0 && failedAppId != 0) {
+                scheduleOrFailStreamReconnect(failedHostId, failedAppId);
+            } else {
+                cancelStreamReconnect("");
+                if (m_ui && m_ui->isInitialized() && failedAppId != 0) {
+                    ui::ApplicationLaunchViewState view;
+                    view.active = false;
+                    view.applicationId = failedAppId;
+                    view.state = ui::LaunchPresentationState::Failed;
+                    view.statusText = "Connect failed";
+                    m_ui->setApplicationLaunchView(view);
+                }
+                refreshAppListView();
+            }
         }
         break;
     case ml::StreamSessionUpdateType::StoppedByUser:
@@ -5588,6 +5695,7 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
             diagPrint("[stream] update: stopped by user");
             // The stream was stopped locally. Clear the transient Connecting state
             // and remain on the App List.
+            cancelStreamReconnect("");
             clearConnectingState();
             // Stop controller input streaming first (sends a neutral state if the
             // connection is still usable, then resets local state).
@@ -5640,6 +5748,170 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         }
     default:
         break;
+    }
+}
+
+/// Schedule the next automatic stream reconnect attempt if retries remain,
+/// or terminate the reconnect sequence with a failure status on the card.
+void MoonlightApp::scheduleOrFailStreamReconnect(ml::HostId hostId,
+                                                 ml::ApplicationId appId) {
+    if (hostId != 0) {
+        scheduleServerInfoQuery(hostId);
+    }
+
+    if (m_reconnectAttempts < kMaxStreamReconnectAttempts &&
+        hostId != 0 && appId != 0) {
+        ++m_reconnectAttempts;
+        m_reconnectHostId = hostId;
+        m_reconnectAppId = appId;
+        m_reconnectDeadlineUs = m_currTimestamp + kStreamReconnectDelayUs;
+        m_reconnecting = true;
+
+        // Keep the card in the local Connecting state while waiting to retry.
+        m_connectingHostId = hostId;
+        m_connectingAppId = appId;
+
+        char statusBuf[64];
+        snprintf(statusBuf, sizeof(statusBuf), "Reconnecting (%u/%u)...",
+                 static_cast<unsigned>(m_reconnectAttempts),
+                 static_cast<unsigned>(kMaxStreamReconnectAttempts));
+
+        if (m_ui && m_ui->isInitialized()) {
+            ui::ApplicationLaunchViewState view;
+            view.active = true;
+            view.applicationId = appId;
+            view.state = ui::LaunchPresentationState::Resuming;
+            view.statusText = statusBuf;
+            m_ui->setApplicationLaunchView(view);
+        }
+
+        char logBuf[160];
+        snprintf(logBuf, sizeof(logBuf),
+                 "[stream] scheduling auto-reconnect attempt %u/%u for host=%llu app=%u",
+                 static_cast<unsigned>(m_reconnectAttempts),
+                 static_cast<unsigned>(kMaxStreamReconnectAttempts),
+                 static_cast<unsigned long long>(hostId),
+                 static_cast<unsigned>(appId));
+        diagPrint(logBuf);
+
+        refreshAppListView();
+        return;
+    }
+
+    // All reconnect attempts exhausted: give up and display "Connection lost".
+    diagPrint("[stream] auto-reconnect attempts exhausted — connection lost");
+    const ml::ApplicationId targetAppId =
+        (appId != 0) ? appId : m_reconnectAppId;
+    m_reconnecting = false;
+    m_reconnectHostId = 0;
+    m_reconnectAppId = 0;
+    m_reconnectDeadlineUs = 0;
+    m_reconnectAttempts = 0;
+    clearConnectingState();
+
+    if (m_ui && m_ui->isInitialized() && targetAppId != 0) {
+        ui::ApplicationLaunchViewState view;
+        view.active = false;
+        view.applicationId = targetAppId;
+        view.state = ui::LaunchPresentationState::Failed;
+        view.statusText = "Connection lost";
+        m_ui->setApplicationLaunchView(view);
+    }
+    refreshAppListView();
+}
+
+/// Cancel any active or pending automatic stream reconnect sequence,
+/// optionally displaying a terminal status string on the app card.
+void MoonlightApp::cancelStreamReconnect(const char* terminalStatusText) {
+    const ml::ApplicationId appId = m_reconnectAppId;
+    const bool wasReconnecting = m_reconnecting;
+    m_reconnecting = false;
+    m_reconnectHostId = 0;
+    m_reconnectAppId = 0;
+    m_reconnectDeadlineUs = 0;
+    m_reconnectAttempts = 0;
+
+    if (wasReconnecting && m_ui && m_ui->isInitialized()) {
+        ui::ApplicationLaunchViewState view;
+        view.active = false;
+        view.applicationId = appId;
+        if (terminalStatusText != nullptr && terminalStatusText[0] != '\0') {
+            view.state = ui::LaunchPresentationState::Failed;
+            view.statusText = terminalStatusText;
+        } else {
+            view.state = ui::LaunchPresentationState::Cancelled;
+            view.statusText.clear();
+        }
+        m_ui->setApplicationLaunchView(view);
+    }
+}
+
+/// Drive the automatic stream reconnect state machine once per frame from
+/// update(). Fires handleActivateApplication() when the backoff deadline
+/// elapses and the host is ready.
+void MoonlightApp::updateStreamReconnect() {
+    if (!m_reconnecting || m_reconnectHostId == 0 || m_reconnectAppId == 0) {
+        return;
+    }
+    // Do not fire while a stream is already active or a launch/resume request
+    // is already in flight.
+    if (m_streamActive || m_launchActive ||
+        (m_streamSessionManager && m_streamSessionManager->isActive()) ||
+        (m_applicationSessionManager && m_applicationSessionManager->isLaunching())) {
+        return;
+    }
+    // Wait until the backoff deadline elapses.
+    if (m_currTimestamp < m_reconnectDeadlineUs) {
+        return;
+    }
+    // If a serverinfo query is still in flight for this host, wait briefly for
+    // it to complete so handleActivateApplication() does not reject due to a
+    // pending serverinfo request.
+    if (m_serverInfoManager && m_serverInfoManager->isPending(m_reconnectHostId)) {
+        if (m_currTimestamp < m_reconnectDeadlineUs + 3000000ull) {
+            return;
+        }
+    }
+
+    const ml::Host* host =
+        m_hostManager ? m_hostManager->findHost(m_reconnectHostId) : nullptr;
+    if (host == nullptr || host->pairingState != ml::HostPairingState::Paired) {
+        clearConnectingState();
+        cancelStreamReconnect("Connection lost");
+        refreshAppListView();
+        return;
+    }
+
+    // If the host is not currently Online or its serverinfo is not Valid yet
+    // (e.g. transient network drop still recovering), consume the next retry
+    // window or fail if retries are exhausted.
+    if (host->availability != ml::HostAvailability::Online ||
+        host->serverInfoState != ml::ServerInfoQueryState::Valid) {
+        scheduleOrFailStreamReconnect(m_reconnectHostId, m_reconnectAppId);
+        return;
+    }
+
+    // If the host reports a different application is now running, abort
+    // automatic reconnect.
+    if (host->currentGame != 0 && host->currentGame != m_reconnectAppId) {
+        clearConnectingState();
+        cancelStreamReconnect("");
+        refreshAppListView();
+        return;
+    }
+
+    char logBuf[160];
+    snprintf(logBuf, sizeof(logBuf),
+             "[stream] executing auto-reconnect attempt %u/%u for host=%llu app=%u",
+             static_cast<unsigned>(m_reconnectAttempts),
+             static_cast<unsigned>(kMaxStreamReconnectAttempts),
+             static_cast<unsigned long long>(m_reconnectHostId),
+             static_cast<unsigned>(m_reconnectAppId));
+    diagPrint(logBuf);
+
+    handleActivateApplication(m_reconnectHostId, m_reconnectAppId);
+    if (!m_launchActive) {
+        scheduleOrFailStreamReconnect(m_reconnectHostId, m_reconnectAppId);
     }
 }
 

@@ -279,6 +279,8 @@ struct UiManager::Impl {
     /// Remaining time (seconds) for the transient mouse emulation state
     /// overlay. > 0 while the overlay is active; 0 when it has expired.
     float mouseEmulationOverlayRemainingSeconds = 0.0f;
+    /// Whether the active stream session currently reports a poor connection.
+    bool streamConnectionPoor = false;
 
     // --- App List selection -------------------------------------------------
     ml::ApplicationId selectedAppId = 0;   ///< Stable selection (0 = none).
@@ -420,6 +422,7 @@ UiResult UiManager::initialize() {
     m_impl->streamStatsEnabledForSession = false;
     m_impl->mouseEmulationEnabled = false;
     m_impl->mouseEmulationOverlayRemainingSeconds = 0.0f;
+    m_impl->streamConnectionPoor = false;
     m_impl->selectedAppId = 0;
     m_impl->selectedAppIndex = -1;
     m_impl->pendingIntent = UiIntent();
@@ -464,6 +467,7 @@ void UiManager::shutdown() {
     m_impl->streamStatsEnabledForSession = false;
     m_impl->mouseEmulationEnabled = false;
     m_impl->mouseEmulationOverlayRemainingSeconds = 0.0f;
+    m_impl->streamConnectionPoor = false;
     m_impl->selectedAppId = 0;
     m_impl->selectedAppIndex = -1;
     m_impl->pendingIntent = UiIntent();
@@ -603,12 +607,16 @@ void UiManager::setApplicationListView(const ApplicationListView& view) {
 
     switch (view.state) {
     case ml::ApplicationCatalogState::Loading:
+        m_impl->launchView = ApplicationLaunchViewState();
+        m_impl->screen = UiScreen::AppList;
+        break;
     case ml::ApplicationCatalogState::Ready:
     case ml::ApplicationCatalogState::Failed:
         m_impl->screen = UiScreen::AppList;
         break;
     case ml::ApplicationCatalogState::Idle:
     default:
+        m_impl->launchView = ApplicationLaunchViewState();
         m_impl->screen = UiScreen::HostList;
         break;
     }
@@ -679,6 +687,7 @@ void UiManager::beginStreamSession(uint64_t nowMs, bool statsEnabledForSession) 
     // transient state overlay is not active until the user toggles it.
     m_impl->mouseEmulationEnabled = false;
     m_impl->mouseEmulationOverlayRemainingSeconds = 0.0f;
+    m_impl->streamConnectionPoor = false;
     m_impl->screen = UiScreen::StreamExitHint;
 }
 
@@ -705,6 +714,7 @@ void UiManager::endStreamSession() {
     m_impl->streamStatsEnabledForSession = false;
     m_impl->mouseEmulationEnabled = false;
     m_impl->mouseEmulationOverlayRemainingSeconds = 0.0f;
+    m_impl->streamConnectionPoor = false;
     m_impl->screen = UiScreen::AppList;
 }
 
@@ -724,11 +734,18 @@ void UiManager::setMouseEmulationState(bool enabled) {
 }
 
 bool UiManager::isMouseEmulationOverlayActive() const {
-    return m_impl && m_impl->mouseEmulationOverlayRemainingSeconds > 0.0f;
+    return m_impl && (m_impl->mouseEmulationOverlayRemainingSeconds > 0.0f ||
+                      m_impl->streamConnectionPoor);
 }
 
 bool UiManager::mouseEmulationEnabled() const {
     return m_impl && m_impl->mouseEmulationEnabled;
+}
+
+void UiManager::setStreamConnectionPoor(bool poor) {
+    if (m_impl) {
+        m_impl->streamConnectionPoor = poor;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,6 +1037,7 @@ bool UiManager::buildMouseEmulationRenderState(MouseEmulationRenderState& out) c
     MouseEmulationRenderState state;
     state.visible = m_impl->mouseEmulationOverlayRemainingSeconds > 0.0f;
     state.enabled = m_impl->mouseEmulationEnabled;
+    state.poorConnection = m_impl->streamConnectionPoor;
 
     out = std::move(state);
     return true;
@@ -1128,6 +1146,11 @@ bool UiManager::buildAppListRenderState(AppListRenderState& out) const {
             m_impl->quitView.active && m_impl->quitView.applicationId == app.id;
         if (card.quitting) {
             card.quitStatusText = m_impl->quitView.statusText;
+        } else if (m_impl->launchView.applicationId == app.id &&
+                   !m_impl->launchView.statusText.empty() &&
+                   (m_impl->launchView.state == LaunchPresentationState::Failed ||
+                    m_impl->launchView.statusText.compare(0, 12, "Reconnecting") == 0)) {
+            card.quitStatusText = m_impl->launchView.statusText;
         }
         card.selected = (static_cast<int>(i) == m_impl->selectedAppIndex);
         state.cards.push_back(std::move(card));
@@ -1165,6 +1188,11 @@ bool UiManager::buildAppGridRenderState(AppGridRenderState& out) const {
             m_impl->quitView.active && m_impl->quitView.applicationId == app.id;
         if (card.quitting) {
             card.quitStatusText = m_impl->quitView.statusText;
+        } else if (m_impl->launchView.applicationId == app.id &&
+                   !m_impl->launchView.statusText.empty() &&
+                   (m_impl->launchView.state == LaunchPresentationState::Failed ||
+                    m_impl->launchView.statusText.compare(0, 12, "Reconnecting") == 0)) {
+            card.quitStatusText = m_impl->launchView.statusText;
         }
         card.selected = (static_cast<int>(i) == m_impl->selectedAppIndex);
         state.cards.push_back(std::move(card));

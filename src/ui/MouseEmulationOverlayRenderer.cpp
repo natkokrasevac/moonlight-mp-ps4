@@ -171,10 +171,10 @@ void MouseEmulationOverlayRenderer::render(const MouseEmulationRenderState& stat
     if (!m_fonts) {
         return;
     }
-    // The renderer draws only when the overlay is visible. The caller
-    // (MoonlightApp) invokes this only while the overlay is active, so this is
-    // a defensive guard.
-    if (!state.visible) {
+    // The renderer draws only when the overlay is visible or a poor-connection
+    // warning is active. The caller (MoonlightApp) invokes this only while the
+    // overlay is active, so this is a defensive guard.
+    if (!state.visible && !state.poorConnection) {
         return;
     }
 
@@ -189,6 +189,25 @@ void MouseEmulationOverlayRenderer::render(const MouseEmulationRenderState& stat
     float baselineY = 0.0f, lineHeight = 0.0f;
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Regular,
                                  baselineY, lineHeight);
+
+    // When the transient mouse-emulation overlay is not shown and a poor
+    // connection warning is active, render the poor-connection warning banner.
+    if (!state.visible && state.poorConnection) {
+        const float line1Baseline = panel.y + kContentPadding + lineHeight;
+        drawCenteredText(comp, *m_fonts, ps4::FontRasterizer::FontFace::Bold,
+                         "Warning: Poor Connection", static_cast<float>(panel.x),
+                         static_cast<float>(panel.w), line1Baseline,
+                         UiTheme::kValueWarningR, UiTheme::kValueWarningG,
+                         UiTheme::kValueWarningB);
+
+        const float line2Baseline = line1Baseline + kLineSpacing + lineHeight;
+        drawCenteredText(comp, *m_fonts, ps4::FontRasterizer::FontFace::Regular,
+                         "Reduce bitrate or check network",
+                         static_cast<float>(panel.x), static_cast<float>(panel.w),
+                         line2Baseline,
+                         UiTheme::kTextR, UiTheme::kTextG, UiTheme::kTextB);
+        return;
+    }
 
     // --- Line 1: "Mouse Emulation: ON/OFF" caption. ------------------------
     const char* stateText = state.enabled ? UiStrings::kOn : UiStrings::kOff;

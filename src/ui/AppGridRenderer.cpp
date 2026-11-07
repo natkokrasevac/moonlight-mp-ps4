@@ -444,7 +444,7 @@ void AppGridRenderer::drawCard(const AppGridCardRenderState& card, int index,
     const float statusY = nameBaseline - 40.0f;
 
     const char* statusText = nullptr;
-    if (card.quitting && !card.quitStatusText.empty()) {
+    if (!card.quitStatusText.empty()) {
         statusText = card.quitStatusText.c_str();
     } else if (card.waitingToLaunch) {
         statusText = "Pending...";

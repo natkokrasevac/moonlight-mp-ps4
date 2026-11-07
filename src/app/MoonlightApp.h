@@ -585,6 +585,23 @@ private:
     /// line is emitted at most once per stream launch.
     bool m_streamStatsOverlayLogged = false;
 
+    // --- Automatic stream reconnect state -----------------------------------
+    /// Maximum number of automatic reconnect attempts after an unexpected
+    /// stream termination before giving up and remaining on the App List.
+    static constexpr uint32_t kMaxStreamReconnectAttempts = 3;
+    /// Delay (µs) before issuing an automatic reconnect attempt (2.0 seconds).
+    static constexpr uint64_t kStreamReconnectDelayUs = 2000000ull;
+    /// HostId of the stream pending automatic reconnect (0 = none).
+    ml::HostId m_reconnectHostId = 0;
+    /// ApplicationId of the stream pending automatic reconnect (0 = none).
+    ml::ApplicationId m_reconnectAppId = 0;
+    /// Monotonic deadline (µs) when the next reconnect attempt should fire.
+    uint64_t m_reconnectDeadlineUs = 0;
+    /// Number of reconnect attempts used since the last established stream.
+    uint32_t m_reconnectAttempts = 0;
+    /// Whether an automatic reconnect sequence is currently in progress.
+    bool m_reconnecting = false;
+
     // --- In-stream overlay caching (persistent overlay layer) ---------------
     // The in-stream overlay (exit hint / statistics / mouse-emulation) is
     // rendered into the CPU compositor surface and alpha-blended over the
@@ -959,6 +976,19 @@ private:
     /// stream lifecycle worker. Applies the update to the UI/state and clears
     /// transient connecting state on terminal outcomes.
     void handleStreamSessionUpdate(const ml::StreamSessionUpdate& update);
+
+    /// Schedule the next automatic stream reconnect attempt if retries remain,
+    /// or terminate the reconnect sequence with a failure status on the card.
+    void scheduleOrFailStreamReconnect(ml::HostId hostId, ml::ApplicationId appId);
+
+    /// Cancel any active or pending automatic stream reconnect sequence,
+    /// optionally displaying a terminal status string on the app card.
+    void cancelStreamReconnect(const char* terminalStatusText = "");
+
+    /// Drive the automatic stream reconnect state machine once per frame from
+    /// update(). Fires handleActivateApplication() when the backoff deadline
+    /// elapses and the host is ready.
+    void updateStreamReconnect();
 
     /// Handle an AudioDecodeOutput update emitted by the audio worker.
     void handleAudioDecodeOutputUpdate(const ml::AudioDecodeOutputUpdate& update);

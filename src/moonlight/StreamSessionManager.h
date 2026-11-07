@@ -108,12 +108,14 @@ struct StreamSessionResult {
 
 /// Semantic connection-state updates emitted to the main thread.
 enum class StreamSessionUpdateType : uint8_t {
-    Connecting,     ///< Connection setup in progress.
-    Connected,      ///< Stream established.
-    Interrupted,    ///< Connection interrupted.
-    Terminated,     ///< Remote/server termination.
-    Failed,         ///< Connection failed.
-    StoppedByUser   ///< Local user stop completed.
+    Connecting,             ///< Connection setup in progress.
+    Connected,              ///< Stream established.
+    Interrupted,            ///< Connection interrupted.
+    Terminated,             ///< Remote/server termination.
+    Failed,                 ///< Connection failed.
+    StoppedByUser,          ///< Local user stop completed.
+    ConnectionStatusPoor,   ///< Poor network connection detected during stream.
+    ConnectionStatusOkay    ///< Network connection recovered to normal.
 };
 
 // ---------------------------------------------------------------------------

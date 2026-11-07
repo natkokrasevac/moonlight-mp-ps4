@@ -685,6 +685,11 @@ public:
     /// stream session.
     bool mouseEmulationEnabled() const;
 
+    /// Set whether the active stream session currently has a poor network
+    /// connection (CONN_STATUS_POOR). Shows an in-stream warning banner while
+    /// true.
+    void setStreamConnectionPoor(bool poor);
+
     /// Poll a pending user intent.
     bool pollIntent(UiIntent& outIntent);
 

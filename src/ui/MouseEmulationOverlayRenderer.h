@@ -48,8 +48,9 @@ namespace ui {
 /// value copy consumed by MouseEmulationOverlayRenderer. UiManager produces it;
 /// it is not an authoritative store.
 struct MouseEmulationRenderState {
-    bool visible = false;   ///< Whether the overlay is currently shown.
-    bool enabled = false;   ///< Whether mouse emulation is currently ON.
+    bool visible = false;         ///< Whether the mouse-emulation overlay is currently shown.
+    bool enabled = false;         ///< Whether mouse emulation is currently ON.
+    bool poorConnection = false;  ///< Whether a poor-connection warning should be shown.
 };
 
 // ---------------------------------------------------------------------------

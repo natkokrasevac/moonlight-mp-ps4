@@ -301,6 +301,19 @@ void ssmClConnectionStatusUpdate(int connectionStatus) {
     snprintf(buf, sizeof(buf), "[stream] connection status: %s",
              connectionStatus == CONN_STATUS_OKAY ? "okay" : "poor");
     ssmDiagPrint(buf);
+
+    StreamSessionManager::Impl* owner = ssmGetActiveOwner();
+    if (owner != nullptr) {
+        StreamSessionUpdate update;
+        update.type = (connectionStatus == CONN_STATUS_OKAY)
+                          ? StreamSessionUpdateType::ConnectionStatusOkay
+                          : StreamSessionUpdateType::ConnectionStatusPoor;
+        update.result = StreamSessionResultCategory::Success;
+        update.hostId = owner->activeSession.hostId;
+        update.applicationId = owner->activeSession.applicationId;
+        update.nativeError = connectionStatus;
+        owner->pushEvent(update);
+    }
 }
 
 void ssmClSetHdrMode(bool hdrEnabled) {
