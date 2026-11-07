@@ -1,6 +1,6 @@
 MOONLIGHT MP FOR PLAYSTATION 4
 ==============================
-Version 2.70
+Version 2.80
 
 This is an unofficial Moonlight client for PlayStation 4 with multi-controller support (MP).
 

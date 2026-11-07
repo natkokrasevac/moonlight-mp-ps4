@@ -1,3 +1,11 @@
+V2.80 - 2026-11-07
+	Automatically attempt up to 3 stream reconnects (with 2s backoff and serverinfo refresh) on unexpected connection drops
+	Forward CONN_STATUS_POOR / CONN_STATUS_OKAY callbacks and render an in-stream Poor Connection warning banner
+	Show Reconnecting (X/3)..., Connection lost, Connect failed, and Launch failed status text on App List and App Grid cards
+	Ensure GpuVideoRenderer creates a valid 16x16 black NV12 dummy texture on initialization and clears active surfaces before stream start
+	Make VideoDecoder request periodic IDR keyframes every 250 ms while awaiting IDR recovery and re-request IDR on transient Vdec2 decode errors
+	Draw a 2-second "Connecting to stream..." status indicator if the first video frame has not yet arrived
+
 V2.70 - 2026-11-07
 	Forward L3 unconditionally and replay buffered 80 ms Options pulse when released before 1s exit hold
 	Evaluate L1 + R1 + Options -> PS/Guide and exit chord state machines every frame for exact 80 ms pulse timing
