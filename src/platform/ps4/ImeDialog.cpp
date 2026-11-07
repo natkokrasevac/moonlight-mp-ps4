@@ -281,13 +281,12 @@ bool ImeDialog::open(const std::string& initialText, const std::string& title,
     param.inputTextBuffer = m_impl->inputBuffer;
     param.title = m_impl->titleBuffer;
 
-    // 4b. Position the OSK dialog. The dialog is vertically centered with its
-    //     left edge anchored at x=1200px. ORBIS_H_LEFT makes `posx` the left
-    //     edge; ORBIS_V_CENTER makes `posy` the vertical center (0 = screen
-    //     center).
-    param.posx = 1400.0f;
+    // 4b. Position the OSK dialog. Centered horizontally (posx = 960) and
+    //     vertically (posy = 540) on the 1920x1080 display to ensure the
+    //     keyboard is fully within the screen boundaries.
+    param.posx = 960.0f;
     param.posy = 540.0f;
-    param.horizontalAlignment = ORBIS_H_LEFT;
+    param.horizontalAlignment = ORBIS_H_CENTER;
     param.verticalAlignment = ORBIS_V_CENTER;
 
     // 5. Select the OSK language set so the confirm/back button mapping
