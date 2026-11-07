@@ -357,15 +357,16 @@ inline void blendA8IntoRgba(uint8_t* dst, uint8_t coverage,
 void blendGlyphIntoRgba(uint8_t* rgba, int surfaceW, int surfaceH, int pitch,
                         const uint8_t* a8, int a8W, int a8H,
                         int destX, int destY, int imageW, int imageH,
-                        uint8_t r, uint8_t g, uint8_t b) {
+                        uint8_t r, uint8_t g, uint8_t b,
+                        int clipX0, int clipY0, int clipX1, int clipY1) {
     for (int y = 0; y < imageH; ++y) {
         const int sy = destY + y;
-        if (sy < 0 || sy >= surfaceH) {
+        if (sy < clipY0 || sy >= clipY1 || sy < 0 || sy >= surfaceH) {
             continue;
         }
         for (int x = 0; x < imageW; ++x) {
             const int sx = destX + x;
-            if (sx < 0 || sx >= surfaceW) {
+            if (sx < clipX0 || sx >= clipX1 || sx < 0 || sx >= surfaceW) {
                 continue;
             }
             const uint8_t cov = a8[y * a8W + x];
@@ -447,10 +448,23 @@ float FontRasterizer::drawText(FontFace face, const char* text,
                                float x, float baselineY,
                                uint8_t r, uint8_t g, uint8_t b,
                                uint8_t* rgba, int surfaceW, int surfaceH,
-                               int pitch) {
+                               int pitch,
+                               int clipX, int clipY, int clipW, int clipH) {
     if (!m_impl || !m_impl->initialized || !text || !rgba ||
         surfaceW <= 0 || surfaceH <= 0 || pitch < surfaceW * 4) {
         return 0.0f;
+    }
+
+    int clipX0 = clipX;
+    int clipY0 = clipY;
+    int clipX1 = (clipW >= 0) ? (clipX + clipW) : surfaceW;
+    int clipY1 = (clipH >= 0) ? (clipY + clipH) : surfaceH;
+    if (clipX0 < 0) clipX0 = 0;
+    if (clipY0 < 0) clipY0 = 0;
+    if (clipX1 > surfaceW) clipX1 = surfaceW;
+    if (clipY1 > surfaceH) clipY1 = surfaceH;
+    if (clipX1 <= clipX0 || clipY1 <= clipY0) {
+        return measureTextWidth(face, text);
     }
     FT_Face font = static_cast<FT_Face>(resolveFontHandle(face));
     if (!font) {
@@ -501,7 +515,8 @@ float FontRasterizer::drawText(FontFace face, const char* text,
                                    destX, destY,
                                    static_cast<int>(cg.width),
                                    static_cast<int>(cg.height),
-                                   r, g, b);
+                                   r, g, b,
+                                   clipX0, clipY0, clipX1, clipY1);
             }
             // Zero-bitmap glyphs (e.g. space) have width/height == 0 and an
             // empty coverage vector; they still advance the pen below.
@@ -591,7 +606,8 @@ float FontRasterizer::drawText(FontFace face, const char* text,
                                destX, destY,
                                static_cast<int>(cg.width),
                                static_cast<int>(cg.height),
-                               r, g, b);
+                               r, g, b,
+                               clipX0, clipY0, clipX1, clipY1);
         }
 
         // Insert the cached entry (moves the coverage vector into the cache).

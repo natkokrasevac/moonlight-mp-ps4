@@ -348,10 +348,12 @@ float UiCompositor::drawText(FontRasterizer::FontFace face, const char* text,
     if (!m_fonts || !text) {
         return 0.0f;
     }
+    const Rect clip = currentClip();
     return m_fonts->drawText(face, text, x, baselineY, r, g, b,
                              m_pixels, static_cast<int>(m_width),
                              static_cast<int>(m_height),
-                             static_cast<int>(m_pitch));
+                             static_cast<int>(m_pitch),
+                             clip.x, clip.y, clip.w, clip.h);
 }
 
 // ---------------------------------------------------------------------------

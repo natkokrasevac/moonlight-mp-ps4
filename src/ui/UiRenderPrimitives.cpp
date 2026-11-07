@@ -99,6 +99,56 @@ void drawAspectFitImage(ps4::UiCompositor& comp, const ps4::CpuPngImage& image,
     }
 }
 
+void drawAspectCoverImage(ps4::UiCompositor& comp, const ps4::CpuImage& image,
+                          int dstX, int dstY, int dstW, int dstH) {
+    if (image.rgba == nullptr || dstW <= 0 || dstH <= 0 || image.width <= 0 || image.height <= 0) {
+        return;
+    }
+    const float srcAspect = static_cast<float>(image.width) / static_cast<float>(image.height);
+    const float dstAspect = static_cast<float>(dstW) / static_cast<float>(dstH);
+
+    int srcX = 0, srcY = 0;
+    int srcSubW = static_cast<int>(image.width);
+    int srcSubH = static_cast<int>(image.height);
+
+    if (srcAspect > dstAspect) {
+        srcSubW = static_cast<int>(static_cast<float>(image.height) * dstAspect);
+        if (srcSubW > static_cast<int>(image.width)) srcSubW = static_cast<int>(image.width);
+        srcX = (static_cast<int>(image.width) - srcSubW) / 2;
+    } else {
+        srcSubH = static_cast<int>(static_cast<float>(image.width) / dstAspect);
+        if (srcSubH > static_cast<int>(image.height)) srcSubH = static_cast<int>(image.height);
+        srcY = (static_cast<int>(image.height) - srcSubH) / 2;
+    }
+
+    comp.drawImageSubRect(image, srcX, srcY, srcSubW, srcSubH, dstX, dstY, dstW, dstH);
+}
+
+void drawAspectCoverImage(ps4::UiCompositor& comp, const ps4::CpuPngImage& image,
+                          int dstX, int dstY, int dstW, int dstH) {
+    if (image.empty() || dstW <= 0 || dstH <= 0 || image.width <= 0 || image.height <= 0) {
+        return;
+    }
+    const float srcAspect = static_cast<float>(image.width) / static_cast<float>(image.height);
+    const float dstAspect = static_cast<float>(dstW) / static_cast<float>(dstH);
+
+    int srcX = 0, srcY = 0;
+    int srcSubW = static_cast<int>(image.width);
+    int srcSubH = static_cast<int>(image.height);
+
+    if (srcAspect > dstAspect) {
+        srcSubW = static_cast<int>(static_cast<float>(image.height) * dstAspect);
+        if (srcSubW > static_cast<int>(image.width)) srcSubW = static_cast<int>(image.width);
+        srcX = (static_cast<int>(image.width) - srcSubW) / 2;
+    } else {
+        srcSubH = static_cast<int>(static_cast<float>(image.width) / dstAspect);
+        if (srcSubH > static_cast<int>(image.height)) srcSubH = static_cast<int>(image.height);
+        srcY = (static_cast<int>(image.height) - srcSubH) / 2;
+    }
+
+    comp.drawImageSubRect(image, srcX, srcY, srcSubW, srcSubH, dstX, dstY, dstW, dstH);
+}
+
 void drawControllerIndicators(ps4::UiCompositor& comp,
                               const ps4::CpuImage& controllerImg,
                               uint8_t controllerMask) {

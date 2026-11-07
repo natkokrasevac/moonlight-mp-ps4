@@ -107,9 +107,9 @@ public:
 
 private:
     float cardWidth() const { return 300.0f; }
-    float cardHeight() const { return 400.0f; }
-    float spacingX() const { return 20.0f; }
-    float spacingY() const { return 20.0f; }
+    float cardHeight() const { return 340.0f; }
+    float spacingX() const { return 28.0f; }
+    float spacingY() const { return 24.0f; }
     float baseFontSize() const { return UiTheme::kBodyFontSize; }
 
     struct Viewport { float x, y, w, h; };

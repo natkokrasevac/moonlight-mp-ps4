@@ -95,6 +95,14 @@ void drawAspectFitImage(ps4::UiCompositor& comp, const ps4::CpuImage& image,
 void drawAspectFitImage(ps4::UiCompositor& comp, const ps4::CpuPngImage& image,
                         int dstX, int dstY, int dstW, int dstH);
 
+/// Draw `image` aspect-cover inside the destination rectangle `dstX`/`dstY`/
+/// `dstW`/`dstH`, center-cropping so the image completely fills the card
+/// with no letterbox/pillarbox empty margins.
+void drawAspectCoverImage(ps4::UiCompositor& comp, const ps4::CpuImage& image,
+                          int dstX, int dstY, int dstW, int dstH);
+void drawAspectCoverImage(ps4::UiCompositor& comp, const ps4::CpuPngImage& image,
+                          int dstX, int dstY, int dstW, int dstH);
+
 /// Draw the shared full-screen background image (1920×1080) at the origin.
 /// Does nothing if `bg` is empty. Used by the screen renderers (Host/App
 /// crossbar and grid, Pairing, Boot) as the common background; overlays do not

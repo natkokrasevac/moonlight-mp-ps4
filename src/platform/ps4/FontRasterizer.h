@@ -108,7 +108,8 @@ public:
     float drawText(FontFace face, const char* text,
                    float x, float baselineY,
                    uint8_t r, uint8_t g, uint8_t b,
-                   uint8_t* rgba, int surfaceW, int surfaceH, int pitch);
+                   uint8_t* rgba, int surfaceW, int surfaceH, int pitch,
+                   int clipX = 0, int clipY = 0, int clipW = -1, int clipH = -1);
 
     /// Returns the horizontal layout (baseline/line-height) for a font face.
     /// Used by the compositor for vertical text layout. Returns false if the

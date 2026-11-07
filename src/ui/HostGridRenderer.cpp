@@ -168,14 +168,12 @@ bool HostGridRenderer::isInitialized() const {
 
 HostGridRenderer::Viewport HostGridRenderer::gridViewport() const {
     // The grid viewport spans the screen from the theme card-left X to the
-    // right edge, and from the theme card-top offset (below the top bar) to
-    // the bottom legend. No safe-area margins are used: HDMI output to a
-    // modern flat panel renders edge-to-edge.
+    // right edge, and between the top bar and the bottom legend with 48px margin.
     const float screenX = UiTheme::kTitleTextX;
-    const float screenY = UiTheme::kTopBarHeight + UiTheme::kCardTopOffset;
+    const float screenY = UiTheme::kTopBarHeight + 48.0f;
     const float screenW = 1920.0f - UiTheme::kTitleTextX;
     const float screenH = 1080.0f - UiTheme::kTopBarHeight -
-                          UiTheme::kBottomLegendHeight - UiTheme::kCardTopOffset;
+                          UiTheme::kBottomLegendHeight - 48.0f;
 
     Viewport v;
     v.x = screenX;
@@ -296,9 +294,6 @@ void HostGridRenderer::renderFull(const HostGridRenderState& state,
     // Draw the shared background image (falls back to solid color if empty).
     drawBackground(comp, m_bgImg);
 
-    drawTopBar(state, comp);
-    drawSeparators(comp);
-
     // The grid is clipped to the scrollable grid viewport.
     const ps4::Rect gv = gridViewportBounds();
     if (comp.pushClip(gv)) {
@@ -308,7 +303,11 @@ void HostGridRenderer::renderFull(const HostGridRenderState& state,
         comp.popClip();
     }
 
+    // Top bar and bottom legend are drawn after the card grid, ensuring that
+    // any cards scrolling behind them are completely occluded by the bar backing.
+    drawTopBar(state, comp);
     drawLegend(state, comp);
+    drawSeparators(comp);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +317,15 @@ void HostGridRenderer::renderFull(const HostGridRenderState& state,
 void HostGridRenderer::drawTopBar(const HostGridRenderState& state, ps4::UiCompositor& comp) {
     if (!m_fonts) {
         return;
+    }
+
+    // Restore the background slice for top bar so cards scrolling behind are completely hidden
+    if (m_bgImg.rgba != nullptr) {
+        comp.drawImageSubRect(m_bgImg, 0, 0, 1920, static_cast<int>(UiTheme::kTopBarHeight),
+                              0, 0, 1920, static_cast<int>(UiTheme::kTopBarHeight));
+    } else {
+        comp.fillRect(0, 0, 1920, static_cast<int>(UiTheme::kTopBarHeight),
+                      UiTheme::kBackgroundR, UiTheme::kBackgroundG, UiTheme::kBackgroundB, 255);
     }
 
     // Title "Hosts" in Title face, positioned at the theme title X and at the
@@ -369,15 +377,19 @@ void HostGridRenderer::drawCard(const HostGridCardRenderState& card, int index,
     const int iw = static_cast<int>(cardWidth());
     const int ih = static_cast<int>(cardHeight());
 
-    // Artwork rectangle (top region of the card, leaving the lower region for
-    // the text/status block).
+    // Solid dark card fill so every card has a consistent solid base
+    comp.fillRect(ix, iy, iw, ih, 20, 26, 38, 255);
+
+    // Artwork rectangle
     const float artMargin = UiTheme::kArtMargin;
-    const float artHeight = UiTheme::kArtHeight;
     const int artX = static_cast<int>(left + artMargin);
     const int artY = static_cast<int>(top + artMargin);
     const int artW = static_cast<int>(cardWidth() - artMargin * 2.0f);
-    const int artH = static_cast<int>(artHeight);
-    drawAspectFitImage(comp, m_hostImg, artX, artY, artW, artH);
+    const int artH = static_cast<int>(cardHeight() - artMargin * 2.0f);
+    drawAspectCoverImage(comp, m_hostImg, artX, artY, artW, artH);
+
+    // Translucent dark bottom scrim for display name readability
+    comp.fillRect(ix, static_cast<int>(top + cardHeight() - 65.0f), iw, 65, 0, 0, 0, 190);
 
     // Text content.
     const float lineH = baseFontSize();
@@ -439,6 +451,16 @@ void HostGridRenderer::drawLegend(const HostGridRenderState& state,
                                   ps4::UiCompositor& comp) {
     if (!m_fonts) {
         return;
+    }
+
+    // Restore the background slice for the bottom bar so cards scrolling behind are completely hidden
+    const int by = static_cast<int>(1080.0f - UiTheme::kBottomLegendHeight);
+    const int bh = static_cast<int>(UiTheme::kBottomLegendHeight);
+    if (m_bgImg.rgba != nullptr) {
+        comp.drawImageSubRect(m_bgImg, 0, by, 1920, bh, 0, by, 1920, bh);
+    } else {
+        comp.fillRect(0, by, 1920, bh,
+                      UiTheme::kBackgroundR, UiTheme::kBackgroundG, UiTheme::kBackgroundB, 255);
     }
 
     // Legend entries: Accept, Delete Host, Add Host Manually, Settings.

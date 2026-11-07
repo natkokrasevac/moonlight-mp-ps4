@@ -172,14 +172,12 @@ bool AppGridRenderer::isInitialized() const {
 
 AppGridRenderer::Viewport AppGridRenderer::gridViewport() const {
     // The grid viewport spans the screen from the theme card-left X to the
-    // right edge, and from the theme card-top offset (below the top bar) to
-    // the bottom legend. No safe-area margins are used: HDMI output to a
-    // modern flat panel renders edge-to-edge.
+    // right edge, and between the top bar and the bottom legend with 48px margin.
     const float screenX = UiTheme::kTitleTextX;
-    const float screenY = UiTheme::kTopBarHeight + UiTheme::kCardTopOffset;
+    const float screenY = UiTheme::kTopBarHeight + 48.0f;
     const float screenW = 1920.0f - UiTheme::kTitleTextX;
     const float screenH = 1080.0f - UiTheme::kTopBarHeight -
-                          UiTheme::kBottomLegendHeight - UiTheme::kCardTopOffset;
+                          UiTheme::kBottomLegendHeight - 48.0f;
 
     Viewport v;
     v.x = screenX;
@@ -300,9 +298,6 @@ void AppGridRenderer::renderFull(const AppGridRenderState& state,
     // Draw the shared background image (falls back to solid color if empty).
     drawBackground(comp, m_bgImg);
 
-    drawTopBar(state, comp);
-    drawSeparators(comp);
-
     // The grid is clipped to the scrollable grid viewport.
     const ps4::Rect gv = gridViewportBounds();
     if (comp.pushClip(gv)) {
@@ -312,7 +307,11 @@ void AppGridRenderer::renderFull(const AppGridRenderState& state,
         comp.popClip();
     }
 
+    // Top bar and bottom legend are drawn after the card grid, ensuring that
+    // any cards scrolling behind them are completely occluded by the bar backing.
+    drawTopBar(state, comp);
     drawLegend(state, comp);
+    drawSeparators(comp);
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +322,15 @@ void AppGridRenderer::drawTopBar(const AppGridRenderState& state,
                                  ps4::UiCompositor& comp) {
     if (!m_fonts) {
         return;
+    }
+
+    // Restore the background slice for top bar so cards scrolling behind are completely hidden
+    if (m_bgImg.rgba != nullptr) {
+        comp.drawImageSubRect(m_bgImg, 0, 0, 1920, static_cast<int>(UiTheme::kTopBarHeight),
+                              0, 0, 1920, static_cast<int>(UiTheme::kTopBarHeight));
+    } else {
+        comp.fillRect(0, 0, 1920, static_cast<int>(UiTheme::kTopBarHeight),
+                      UiTheme::kBackgroundR, UiTheme::kBackgroundG, UiTheme::kBackgroundB, 255);
     }
 
     // Title "Applications <host>" in Title face, positioned at the theme title
@@ -382,22 +390,25 @@ void AppGridRenderer::drawCard(const AppGridCardRenderState& card, int index,
     const int iw = static_cast<int>(cardWidth());
     const int ih = static_cast<int>(cardHeight());
 
-    // Artwork rectangle (top region of the card, leaving the lower region for
-    // the text/status block). Use the resolved runtime artwork if present;
-    // otherwise fall back to the bundled app_fallback.png. The artwork pointer
-    // is borrowed (non-owning): the renderer only reads it and never frees or
-    // retains it past the authoritative owner's lifetime.
+    // Solid dark card fill so every card has a consistent solid base
+    comp.fillRect(ix, iy, iw, ih, 20, 26, 38, 255);
+
+    // Artwork rectangle covers the full card area. Using drawAspectCoverImage
+    // center-crops non-portrait artwork (e.g., 16:9 Desktop cards) so all cards
+    // are rendered at the exact same physical size.
     const float artMargin = UiTheme::kArtMargin;
-    const float artHeight = UiTheme::kArtHeight;
     const int artX = static_cast<int>(left + artMargin);
     const int artY = static_cast<int>(top + artMargin);
     const int artW = static_cast<int>(cardWidth() - artMargin * 2.0f);
-    const int artH = static_cast<int>(artHeight);
+    const int artH = static_cast<int>(cardHeight() - artMargin * 2.0f);
     if (card.artwork != nullptr) {
-        drawAspectFitImage(comp, *card.artwork, artX, artY, artW, artH);
+        drawAspectCoverImage(comp, *card.artwork, artX, artY, artW, artH);
     } else {
-        drawAspectFitImage(comp, m_appImg, artX, artY, artW, artH);
+        drawAspectCoverImage(comp, m_appImg, artX, artY, artW, artH);
     }
+
+    // Translucent dark bottom scrim so title and status are always crystal clear over any art
+    comp.fillRect(ix, static_cast<int>(top + cardHeight() - 75.0f), iw, 75, 0, 0, 0, 190);
 
     // Text content.
     const float lineH = baseFontSize();
@@ -460,6 +471,16 @@ void AppGridRenderer::drawLegend(const AppGridRenderState& state,
                                  ps4::UiCompositor& comp) {
     if (!m_fonts) {
         return;
+    }
+
+    // Restore the background slice for the bottom bar so cards scrolling behind are completely hidden
+    const int by = static_cast<int>(1080.0f - UiTheme::kBottomLegendHeight);
+    const int bh = static_cast<int>(UiTheme::kBottomLegendHeight);
+    if (m_bgImg.rgba != nullptr) {
+        comp.drawImageSubRect(m_bgImg, 0, by, 1920, bh, 0, by, 1920, bh);
+    } else {
+        comp.fillRect(0, by, 1920, bh,
+                      UiTheme::kBackgroundR, UiTheme::kBackgroundG, UiTheme::kBackgroundB, 255);
     }
 
     // Legend entries: Accept (Launch / Resume), Back to Hosts, Quit App (if

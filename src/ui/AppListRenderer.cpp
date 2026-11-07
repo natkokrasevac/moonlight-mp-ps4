@@ -339,21 +339,25 @@ void AppListRenderer::drawCard(const AppListCardRenderData& card, int index,
     const int iw = static_cast<int>(w);
     const int ih = static_cast<int>(h);
 
-    // Artwork rectangle (scaled with the card). Use the resolved runtime
-    // artwork if present; otherwise fall back to the bundled app_fallback.png.
-    // The artwork pointer is borrowed (non-owning): the renderer only reads it
-    // and never frees or retains it past the authoritative owner's lifetime.
+    // Solid dark card fill so every card has a consistent solid base
+    comp.fillRect(ix, iy, iw, ih, 20, 26, 38, 255);
+
+    // Artwork rectangle covers the full card area. Using drawAspectCoverImage
+    // center-crops non-portrait artwork (e.g., 16:9 Desktop cards) so all cards
+    // are rendered at the exact same physical size.
     const float artMargin = UiTheme::kArtMargin * scale;
-    const float artHeight = UiTheme::kArtHeight * scale;
     const int artX = static_cast<int>(left + artMargin);
     const int artY = static_cast<int>(top + artMargin);
     const int artW = static_cast<int>(w - artMargin * 2.0f);
-    const int artH = static_cast<int>(artHeight);
+    const int artH = static_cast<int>(h - artMargin * 2.0f);
     if (card.artwork != nullptr) {
-        drawAspectFitImage(comp, *card.artwork, artX, artY, artW, artH);
+        drawAspectCoverImage(comp, *card.artwork, artX, artY, artW, artH);
     } else {
-        drawAspectFitImage(comp, m_appImg, artX, artY, artW, artH);
+        drawAspectCoverImage(comp, m_appImg, artX, artY, artW, artH);
     }
+
+    // Translucent dark bottom scrim for title/status readability
+    comp.fillRect(ix, static_cast<int>(top + h - 65.0f * scale), iw, static_cast<int>(65.0f * scale), 0, 0, 0, 190);
 
     // Text content.
     const float fontSize = baseFontSize() * scale;
