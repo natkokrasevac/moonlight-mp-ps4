@@ -5583,54 +5583,60 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         }
         break;
     case ml::StreamSessionUpdateType::StoppedByUser:
-        diagPrint("[stream] update: stopped by user");
-        // The stream was stopped locally. Clear the transient Connecting state
-        // and remain on the App List.
-        clearConnectingState();
-        // Stop controller input streaming first (sends a neutral state if the
-        // connection is still usable, then resets local state).
-        if (m_controllerInputStreaming) {
-            m_controllerInputStreaming->stop();
+        {
+            diagPrint("[stream] update: stopped by user");
+            // The stream was stopped locally. Clear the transient Connecting state
+            // and remain on the App List.
+            clearConnectingState();
+            // Stop controller input streaming first (sends a neutral state if the
+            // connection is still usable, then resets local state).
+            if (m_controllerInputStreaming) {
+                m_controllerInputStreaming->stop();
+            }
+            // Exit stream presentation mode. Release the held frame BEFORE
+            // stopping the decoder so no presentation reads freed memory.
+            m_streamActive = false;
+            m_exitChordHoldStartUs = 0;
+            const ml::HostId stoppedHostId = m_streamHostId;
+            m_streamHostId = 0;
+            m_streamAppId = 0;
+            m_heldDecodedFrame.release();
+            m_retiredFrames.clear();
+            for (auto& ref : m_streamSlotRefs) {
+                ref.valid = false;
+            }
+            // Reset the in-stream overlay cache so no stale overlay content
+            // lingers into the next stream session.
+            resetStreamOverlayCache();
+            // Release the GPU NV12→BGRA fullscreen video pass resources.
+            if (m_gpuVideoRenderer) {
+                m_gpuVideoRenderer->shutdown();
+            }
+            // End the stream presentation session in the UI: clear overlay state
+            // and return to the App List.
+            if (m_ui && m_ui->isInitialized()) {
+                m_ui->endStreamSession();
+            }
+            // Stop the decoder on the main thread (after presentation has ceased).
+            if (m_videoDecoder) {
+                m_videoDecoder->stop();
+            }
+            // Stop the AudioDecodeOutput (it is no longer needed once the stream
+            // ends). This closes the AudioOut port and destroys the Opus decoder.
+            if (m_audioDecodeOutput) {
+                m_audioDecodeOutput->stop();
+            }
+            // Return to the App List presentation. Invalidate the App List /
+            // App Grid renderer "valid" flags so the next render() performs a
+            // full recompose.
+            m_prevAppListValid = false;
+            m_prevAppGridValid = false;
+            refreshAppListView();
+            if (stoppedHostId != 0) {
+                scheduleServerInfoQuery(stoppedHostId);
+            }
+            break;
         }
-        // Exit stream presentation mode. Release the held frame BEFORE
-        // stopping the decoder so no presentation reads freed memory.
-        m_streamActive = false;
-    m_exitChordHoldStartUs = 0;
-        m_streamHostId = 0;
-        m_streamAppId = 0;
-        m_heldDecodedFrame.release();
-        m_retiredFrames.clear();
-        for (auto& ref : m_streamSlotRefs) {
-            ref.valid = false;
-        }
-        // Reset the in-stream overlay cache so no stale overlay content
-        // lingers into the next stream session.
-        resetStreamOverlayCache();
-        // Release the GPU NV12→BGRA fullscreen video pass resources.
-        if (m_gpuVideoRenderer) {
-            m_gpuVideoRenderer->shutdown();
-        }
-        // End the stream presentation session in the UI: clear overlay state
-        // and return to the App List.
-        if (m_ui && m_ui->isInitialized()) {
-            m_ui->endStreamSession();
-        }
-        // Stop the decoder on the main thread (after presentation has ceased).
-        if (m_videoDecoder) {
-            m_videoDecoder->stop();
-        }
-        // Stop the AudioDecodeOutput (it is no longer needed once the stream
-        // ends). This closes the AudioOut port and destroys the Opus decoder.
-        if (m_audioDecodeOutput) {
-            m_audioDecodeOutput->stop();
-        }
-        // Return to the App List presentation. Invalidate the App List /
-        // App Grid renderer "valid" flags so the next render() performs a
-        // full recompose.
-        m_prevAppListValid = false;
-        m_prevAppGridValid = false;
-        refreshAppListView();
-        break;
     default:
         break;
     }
