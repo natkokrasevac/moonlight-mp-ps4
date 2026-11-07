@@ -126,7 +126,10 @@ public:
     /// mouse emulation state (touchpad movement → relative mouse, Cross/Circle
     /// → left/right click). It always starts OFF for a new stream and can be
     /// toggled in-stream via Options + TouchPad Click.
-    void start(uint32_t sessionGeneration, bool mouseEmulationEnabled);
+    /// `swapFaceButtons`: whether Cross/Circle are swapped on the host.
+    /// `gyroMotionEnabled`: whether to announce gyro/accel capabilities and stream IMU data.
+    void start(uint32_t sessionGeneration, bool mouseEmulationEnabled,
+               bool swapFaceButtons = false, bool gyroMotionEnabled = true);
 
     /// Stop forwarding. Sends a neutral controller state and releases all
     /// keys/buttons if the connection is still usable, then resets local

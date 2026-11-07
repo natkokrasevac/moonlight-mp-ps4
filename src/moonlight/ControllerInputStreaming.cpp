@@ -41,7 +41,9 @@
 #include "platform/ps4/InputManager.h"   // ps4::InputManager, ps4::ControllerState, ps4::KeyboardEvent, ps4::MouseEvent, ps4::KeyAction
 #include "StreamSessionManager.h"        // ml::StreamSessionManager, ml::StreamSessionState
 
-#include <orbis/libkernel.h>             // sceKernelGetProcessTime
+#include <orbis/libkernel.h>             // sceKernelGetProcessTime, sceKernelUsleep
+#include <pthread.h>
+#include <atomic>
 
 // --- moonlight-common-c (C) header — confined to this translation unit --------
 #include "Limelight.h"                   // LiSendControllerEvent, LiSendKeyboardEvent2, LiSendMouseMoveEvent, LiSendMouseButtonEvent, LiSendHighResScrollEvent, LiSendHighResHScrollEvent, button flags
@@ -97,6 +99,7 @@ constexpr int kFlagR3      = RS_CLK_FLAG; // 0x0080
 constexpr int kFlagOptions = PLAY_FLAG;   // 0x0010
 constexpr int kFlagBack    = BACK_FLAG;   // 0x0020 (Back/Select)
 constexpr int kFlagSpecial = SPECIAL_FLAG; // 0x0400 (PS/Home/Guide)
+constexpr int kFlagTouchpad = TOUCHPAD_FLAG; // 0x100000 (DS4 Touchpad Button)
 
 // PS4 raw button bits used by the chord logic (ORBIS_PAD_BUTTON_*).
 constexpr uint32_t kRawTouchpad = 0x00100000u; // ORBIS_PAD_BUTTON_TOUCH_PAD
@@ -117,6 +120,11 @@ constexpr uint32_t kRawCircle = 0x00002000u; // ORBIS_PAD_BUTTON_CIRCLE
 /// ≈ 960 px, a comfortable default for a 1080p host. This is a fixed initial
 /// value; a future "Mouse Sensitivity" UI setting can replace it.
 constexpr float kTouchpadMouseSensitivity = 0.5f;
+
+/// Sensitivity and threshold constants for 2-finger touchpad gestures
+constexpr float kScrollLockTravelPx = 40.0f;     ///< Movement threshold before locking into scroll
+constexpr float kScrollPxPerTick    = 128.0f;    ///< Touch px per 1 wheel notch
+constexpr float kWheelUnit          = 120.0f;    ///< High-res wheel delta per notch (Windows standard)
 
 /// Touchpad X midpoint (the touchpad is 1920 units wide). A single touch on
 /// the left half (touchX < this) + touchpad click maps to Back/Select; a
@@ -145,6 +153,13 @@ struct ControllerInputStreaming::Impl {
     // --- Session gating -----------------------------------------------------
     uint32_t sessionGeneration = 0;   ///< Generation this module is forwarding for.
     bool inputReady = false;          ///< True once the target input channel is ready.
+    bool swapFaceButtons = false;     ///< Cross <-> Circle swap
+    bool gyroMotionEnabled = true;    ///< Gyro/accel announcement & reports
+
+    // --- High-frequency (250 Hz) polling thread -----------------------------
+    pthread_t pollerThread;
+    bool pollerRunning = false;
+    std::atomic<bool> pollerStop{false};
 
     // --- Guide chord state tracking (L1 + R1 + Options -> PS/Guide pulse) ---
     struct GuideChordState {
@@ -223,14 +238,27 @@ struct ControllerInputStreaming::Impl {
     // Whether mouse emulation is enabled for the current session. Starts OFF
     // at start() and can be toggled in-stream via Options + TouchPad Click.
     bool mouseEmulationEnabled = false;
-    // Touch-delta tracking: whether a previous touch position is available.
-    // Reset on touch start (to avoid a large initial jump) and on touch
-    // release / session stop.
-    bool havePrevTouch = false;
-    int16_t prevTouchX = 0;
-    int16_t prevTouchY = 0;
-    // Tracks the currently-held emulated mouse buttons (Cross→left, Circle→
-    // right) so they can be released on stop (avoid stuck buttons on host).
+
+    // Multi-touch gesture state machine
+    enum class TouchMode {
+        None,
+        Pointer,
+        PendingTwoFinger,
+        Scroll
+    };
+    TouchMode touchMode = TouchMode::None;
+    int trackedFingerIds[2] = {0, 0};
+    int trackedX[2] = {0, 0};
+    int trackedY[2] = {0, 0};
+    float accPointerX = 0.0f;
+    float accPointerY = 0.0f;
+    float accScrollX = 0.0f;
+    float accScrollY = 0.0f;
+    float twoFingerTravel = 0.0f;
+    bool touchLeftClickHeld = false;
+    bool touchRightClickHeld = false;
+
+    // Legacy / Cross-Circle held state for mouse buttons
     uint32_t heldEmulatedMouseButtons = 0;
     // Whether the mouse-assist toggle chord (Options + TouchPad Click) was
     // held on the previous frame, for rising-edge toggle detection.
@@ -262,6 +290,7 @@ struct ControllerInputStreaming::Impl {
     static int buildButtonFlags(const ps4::ControllerState& s,
                                 bool isPrimaryController,
                                 bool mouseEmulationActive,
+                                bool swapFace,
                                 GuideChordState& guide,
                                 ExitChordState& exitState) {
         const uint32_t b = s.buttons;
@@ -280,10 +309,12 @@ struct ControllerInputStreaming::Impl {
 
         int flags = 0;
         // Cross/Circle are consumed as mouse buttons when mouse emulation is
-        // active; otherwise they map to A/B.
+        // active; otherwise they map to A/B (swapped if swapFace is set).
         if (!mouseEmulationActive) {
-            if (b & 0x00004000u) flags |= kFlagCross;      // ORBIS_PAD_BUTTON_CROSS
-            if (b & 0x00002000u) flags |= kFlagCircle;     // ORBIS_PAD_BUTTON_CIRCLE
+            int flagA = swapFace ? kFlagCircle : kFlagCross;
+            int flagB = swapFace ? kFlagCross : kFlagCircle;
+            if (b & 0x00004000u) flags |= flagA;      // ORBIS_PAD_BUTTON_CROSS
+            if (b & 0x00002000u) flags |= flagB;      // ORBIS_PAD_BUTTON_CIRCLE
         }
         if (b & 0x00008000u) flags |= kFlagSquare;     // ORBIS_PAD_BUTTON_SQUARE
         if (b & 0x00001000u) flags |= kFlagTriangle;   // ORBIS_PAD_BUTTON_TRIANGLE
@@ -352,9 +383,16 @@ struct ControllerInputStreaming::Impl {
             flags |= kFlagOptions;
         }
 
-        // Touchpad click maps to Host Touchpad / Back / Select (BACK_FLAG).
-        if (touchpadPressed && !mouseAssistChord) {
-            flags |= kFlagBack;
+        // Touchpad click:
+        // When mouse emulation is OFF:
+        // If clicked on left half (touchX < 960) -> Back/Select (BACK_FLAG).
+        // If clicked on right half (touchX >= 960) or no touch -> DS4 Touchpad Button (TOUCHPAD_FLAG).
+        if (touchpadPressed && !mouseAssistChord && !mouseEmulationActive) {
+            if (s.touchActive && s.touchX < kTouchpadXMidpoint) {
+                flags |= kFlagBack;
+            } else {
+                flags |= kFlagTouchpad;
+            }
         }
 
         // L3 always passes through so sprinting is uninterrupted.
@@ -560,9 +598,6 @@ struct ControllerInputStreaming::Impl {
     }
 
     // --- Helper: release all held emulated mouse buttons -------------------
-    // Sends release events for any held emulated mouse buttons (Cross→left,
-    // Circle→right) and clears the held set. Used when mouse emulation is
-    // toggled off mid-stream so no mouse button is left stuck on the host.
     void releaseEmulatedMouseButtons() {
         if (inputReady) {
             if (heldEmulatedMouseButtons & kRawCross) {
@@ -571,8 +606,21 @@ struct ControllerInputStreaming::Impl {
             if (heldEmulatedMouseButtons & kRawCircle) {
                 LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
             }
+            if (touchLeftClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                touchLeftClickHeld = false;
+            }
+            if (touchRightClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                touchRightClickHeld = false;
+            }
         }
         heldEmulatedMouseButtons = 0;
+        touchMode = TouchMode::None;
+        trackedFingerIds[0] = trackedFingerIds[1] = 0;
+        accPointerX = accPointerY = 0.0f;
+        accScrollX = accScrollY = 0.0f;
+        twoFingerTravel = 0.0f;
     }
 
     // --- Helper: release all held keys/buttons on stop ----------------------
@@ -607,71 +655,191 @@ struct ControllerInputStreaming::Impl {
         }
         heldMouseButtons = 0;
 
-        // Release all held emulated mouse buttons (Cross→left, Circle→right).
-        if (heldEmulatedMouseButtons & kRawCross) {
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
-        }
-        if (heldEmulatedMouseButtons & kRawCircle) {
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
-        }
-        heldEmulatedMouseButtons = 0;
-
-        // Reset touch-delta tracking so no stale previous position survives.
-        havePrevTouch = false;
-        prevTouchX = 0;
-        prevTouchY = 0;
+        releaseEmulatedMouseButtons();
     }
 
     // --- Helper: process controller-assisted mouse emulation ---------------
-    // Consumes the current ControllerState and emits relative mouse movement
-    // from touchpad deltas and left/right clicks from Cross/Circle. When mouse
-    // emulation is active, Cross/Circle are consumed as mouse buttons (not
-    // forwarded as controller A/B by buildButtonFlags). Touchpad click is NOT
-    // used here (it remains reserved for the Back/Start mapping).
+    // Full multi-touch gesture engine:
+    // 1 finger moving -> relative mouse with sub-pixel float accumulator
+    // 1 finger physical click -> left mouse button
+    // 2 fingers landed -> right mouse button on physical click (if travel < threshold)
+    // 2 fingers moving -> high-res horizontal/vertical scroll
+    // Cross/Circle -> optional auxiliary left/right mouse clicks
     void processMouseEmulation(const ps4::ControllerState& s) {
         if (!inputReady) {
             return;
         }
 
-        // --- Touchpad movement → relative mouse ----------------------------
-        if (s.touchActive) {
-            if (havePrevTouch) {
-                int32_t deltaX = static_cast<int32_t>(s.touchX) - prevTouchX;
-                int32_t deltaY = static_cast<int32_t>(s.touchY) - prevTouchY;
+        const bool physicalClick = (s.buttons & kRawTouchpad) != 0;
+        const int fingers = s.touchFingers > 2 ? 2 : s.touchFingers;
 
-                // Scale by the fixed sensitivity.
-                int32_t scaledX = static_cast<int32_t>(
-                    static_cast<float>(deltaX) * kTouchpadMouseSensitivity);
-                int32_t scaledY = static_cast<int32_t>(
-                    static_cast<float>(deltaY) * kTouchpadMouseSensitivity);
+        int seen[2] = {0, 0};
 
-                // Clamp to the short range accepted by LiSendMouseMoveEvent.
-                if (scaledX > 32767) scaledX = 32767;
-                if (scaledX < -32768) scaledX = -32768;
-                if (scaledY > 32767) scaledY = 32767;
-                if (scaledY < -32768) scaledY = -32768;
+        // 1. Update existing tracked contacts
+        for (int i = 0; i < fingers; ++i) {
+            int id = s.touchPoints[i].id;
+            if (id == 0) continue;
 
-                if (scaledX != 0 || scaledY != 0) {
-                    LiSendMouseMoveEvent(static_cast<short>(scaledX),
-                                         static_cast<short>(scaledY));
+            int slot = -1;
+            if (trackedFingerIds[0] == id) slot = 0;
+            else if (trackedFingerIds[1] == id) slot = 1;
+            if (slot < 0) continue;
+
+            seen[slot] = 1;
+            int dx = s.touchPoints[i].x - trackedX[slot];
+            int dy = s.touchPoints[i].y - trackedY[slot];
+            trackedX[slot] = s.touchPoints[i].x;
+            trackedY[slot] = s.touchPoints[i].y;
+
+            if (dx == 0 && dy == 0) continue;
+
+            if (touchMode == TouchMode::Pointer) {
+                accPointerX += static_cast<float>(dx) * kTouchpadMouseSensitivity;
+                accPointerY += static_cast<float>(dy) * kTouchpadMouseSensitivity;
+            } else if (touchMode == TouchMode::PendingTwoFinger || touchMode == TouchMode::Scroll) {
+                accScrollX += static_cast<float>(dx) * 0.5f;
+                accScrollY += static_cast<float>(dy) * 0.5f;
+                if (touchMode == TouchMode::PendingTwoFinger) {
+                    float adx = dx < 0 ? -static_cast<float>(dx) : static_cast<float>(dx);
+                    float ady = dy < 0 ? -static_cast<float>(dy) : static_cast<float>(dy);
+                    twoFingerTravel += (adx > ady ? adx : ady);
                 }
             }
-            // On touch start (no previous position), just record the current
-            // position so the first frame produces no large jump.
-            prevTouchX = s.touchX;
-            prevTouchY = s.touchY;
-            havePrevTouch = true;
-        } else {
-            // Touch released: clear movement tracking.
-            havePrevTouch = false;
-            prevTouchX = 0;
-            prevTouchY = 0;
         }
 
-        // --- Cross/Circle → left/right mouse buttons -----------------------
-        // Detect press/release transitions and emit mouse button events. When
-        // mouse emulation is active, these buttons are consumed as mouse
-        // buttons (not forwarded as controller A/B by buildButtonFlags).
+        // New contacts anchor without jumping
+        for (int i = 0; i < fingers; ++i) {
+            int id = s.touchPoints[i].id;
+            if (id == 0) continue;
+            if (trackedFingerIds[0] == id || trackedFingerIds[1] == id) continue;
+
+            int freeSlot = -1;
+            if (trackedFingerIds[0] == 0) freeSlot = 0;
+            else if (trackedFingerIds[1] == 0) freeSlot = 1;
+            if (freeSlot >= 0) {
+                trackedFingerIds[freeSlot] = id;
+                trackedX[freeSlot] = s.touchPoints[i].x;
+                trackedY[freeSlot] = s.touchPoints[i].y;
+            }
+        }
+
+        // Drop contacts that vanished
+        int trackedCount = 0;
+        for (int i = 0; i < 2; ++i) {
+            if (trackedFingerIds[i] != 0) {
+                bool alive = false;
+                for (int k = 0; k < fingers; ++k) {
+                    if (s.touchPoints[k].id == trackedFingerIds[i]) {
+                        alive = true;
+                        break;
+                    }
+                }
+                if (!alive) {
+                    trackedFingerIds[i] = 0;
+                } else {
+                    trackedCount++;
+                }
+            }
+        }
+
+        // 2. Mode transitions
+        if (trackedCount == 0) {
+            if (touchLeftClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                touchLeftClickHeld = false;
+            }
+            if (touchRightClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                touchRightClickHeld = false;
+            }
+            touchMode = TouchMode::None;
+            twoFingerTravel = 0.0f;
+            accScrollX = accScrollY = 0.0f;
+        } else if (trackedCount == 1) {
+            if (touchMode == TouchMode::PendingTwoFinger || touchMode == TouchMode::Scroll) {
+                if (touchRightClickHeld) {
+                    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                    touchRightClickHeld = false;
+                }
+                accPointerX = accPointerY = 0.0f;
+            }
+            touchMode = TouchMode::Pointer;
+            twoFingerTravel = 0.0f;
+        } else {
+            // 2 tracked fingers
+            if (touchMode == TouchMode::Pointer || touchMode == TouchMode::None) {
+                if (touchLeftClickHeld) {
+                    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                    touchLeftClickHeld = false;
+                }
+                touchMode = TouchMode::PendingTwoFinger;
+                twoFingerTravel = 0.0f;
+                accScrollX = accScrollY = 0.0f;
+                accPointerX = accPointerY = 0.0f;
+            }
+            if (touchMode == TouchMode::PendingTwoFinger && twoFingerTravel >= kScrollLockTravelPx) {
+                touchMode = TouchMode::Scroll;
+                if (touchRightClickHeld) {
+                    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                    touchRightClickHeld = false;
+                }
+            }
+        }
+
+        // 3. Emit pointer and scroll
+        if (touchMode == TouchMode::Pointer) {
+            int ix = static_cast<int>(accPointerX);
+            int iy = static_cast<int>(accPointerY);
+            if (ix != 0 || iy != 0) {
+                accPointerX -= static_cast<float>(ix);
+                accPointerY -= static_cast<float>(iy);
+                LiSendMouseMoveEvent(static_cast<short>(ix), static_cast<short>(iy));
+            }
+        } else if (touchMode == TouchMode::Scroll) {
+            int vy = static_cast<int>(accScrollY / kScrollPxPerTick * kWheelUnit);
+            int vx = static_cast<int>(accScrollX / kScrollPxPerTick * kWheelUnit);
+            if (vy != 0) {
+                accScrollY -= (static_cast<float>(vy) * kScrollPxPerTick / kWheelUnit);
+                // Negative wheel = content scrolls down (fingers moving up)
+                LiSendHighResScrollEvent(static_cast<short>(-vy));
+            }
+            if (vx != 0) {
+                accScrollX -= (static_cast<float>(vx) * kScrollPxPerTick / kWheelUnit);
+                LiSendHighResHScrollEvent(static_cast<short>(vx));
+            }
+        }
+
+        // 4. Physical touchpad clicks
+        if (touchMode == TouchMode::Pointer) {
+            if (physicalClick && !touchLeftClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+                touchLeftClickHeld = true;
+            } else if (!physicalClick && touchLeftClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                touchLeftClickHeld = false;
+            }
+        } else if (touchMode == TouchMode::PendingTwoFinger) {
+            // Two fingers resting: right click
+            if (physicalClick && !touchRightClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
+                touchRightClickHeld = true;
+            } else if (!physicalClick && touchRightClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                touchRightClickHeld = false;
+            }
+        } else if (touchMode == TouchMode::Scroll) {
+            // Guard clicks while scrolling
+            if (touchLeftClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                touchLeftClickHeld = false;
+            }
+            if (touchRightClickHeld) {
+                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                touchRightClickHeld = false;
+            }
+        }
+
+        // --- Cross/Circle auxiliary buttons (optional) ---------------------
         const bool crossPressed = (s.buttons & kRawCross) != 0;
         const bool circlePressed = (s.buttons & kRawCircle) != 0;
 
@@ -693,6 +861,174 @@ struct ControllerInputStreaming::Impl {
             LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
             heldEmulatedMouseButtons &= ~kRawCircle;
         }
+    }
+
+    // Helper: poll and stream controllers & motion once
+    void pollAndStreamControllers() {
+        if (!inputReady || !inputManager) {
+            return;
+        }
+
+        // Snapshot state for controller 0
+        ps4::ControllerState state0;
+        bool state0Valid = inputManager->latestControllerState(state0, 0);
+
+        // Options + TouchPad Click on P1 toggles mouse assist
+        if (state0Valid) {
+            const bool chordHeld =
+                (state0.buttons & kRawOptions) && (state0.buttons & kRawTouchpad);
+            if (chordHeld && !prevMouseAssistChordHeld) {
+                mouseEmulationEnabled = !mouseEmulationEnabled;
+                if (!mouseEmulationEnabled) {
+                    releaseEmulatedMouseButtons();
+                }
+                char buf[96];
+                snprintf(buf, sizeof(buf),
+                         "[input] mouse assist toggled %s",
+                         mouseEmulationEnabled ? "ON" : "OFF");
+                cisDiagPrint(buf);
+            }
+            prevMouseAssistChordHeld = chordHeld;
+        }
+
+        // Process all controller slots
+        for (int i = 0; i < Impl::kMaxControllers; ++i) {
+            Impl::ControllerTrack& track = controllers[i];
+            ps4::ControllerState state;
+            bool isConnected = inputManager->latestControllerState(state, i) &&
+                               state.connected;
+
+            // Disconnect detection
+            if (track.wasConnected && !isConnected) {
+                track.wasConnected = false;
+                track.havePreviousState = false;
+                track.arrivalSent = false;
+                track.framesSinceRefresh = 0;
+                uint16_t newMask = computeActiveGamepadMask();
+                sendMultiNeutralState(static_cast<short>(i), newMask);
+                char buf[96];
+                snprintf(buf, sizeof(buf), "[input] controller %d disconnected — neutral sent", i);
+                cisDiagPrint(buf);
+                continue;
+            }
+
+            if (!isConnected) {
+                continue;
+            }
+
+            // Arrival detection
+            bool isNewConnection = !track.wasConnected;
+            if (isNewConnection) {
+                track.wasConnected = true;
+                uint16_t mask = computeActiveGamepadMask();
+                if (!track.arrivalSent) {
+                    uint16_t caps = LI_CCAP_ANALOG_TRIGGERS | LI_CCAP_RUMBLE |
+                                    LI_CCAP_RGB_LED | LI_CCAP_TOUCHPAD;
+                    if (gyroMotionEnabled) {
+                        caps |= (LI_CCAP_GYRO | LI_CCAP_ACCEL);
+                    }
+                    LiSendControllerArrivalEvent(static_cast<uint8_t>(i),
+                                                 mask,
+                                                 LI_CTYPE_PS,
+                                                 0xFFFFFFFF,
+                                                 caps);
+                    LiSendControllerBatteryEvent(static_cast<uint8_t>(i),
+                                                 LI_BATTERY_STATE_FULL,
+                                                 100);
+                    track.arrivalSent = true;
+                }
+                char buf[96];
+                snprintf(buf, sizeof(buf), "[input] controller %d connected/arrived (mask=0x%04X)", i, mask);
+                cisDiagPrint(buf);
+            }
+
+            uint16_t currentMask = computeActiveGamepadMask();
+            const bool isPrimary = (i == 0);
+            const bool mouseEmulationActive = isPrimary && mouseEmulationEnabled;
+
+            const int flags = Impl::buildButtonFlags(
+                state, isPrimary, mouseEmulationActive, swapFaceButtons,
+                track.guideChord, track.exitChord);
+
+            bool changed = !track.havePreviousState || isNewConnection ||
+                           (flags != track.lastSentFlags);
+            if (track.havePreviousState && !changed) {
+                const ps4::ControllerState& p = track.previousState;
+                changed = (state.buttons != p.buttons) ||
+                          (state.leftStickX != p.leftStickX) ||
+                          (state.leftStickY != p.leftStickY) ||
+                          (state.rightStickX != p.rightStickX) ||
+                          (state.rightStickY != p.rightStickY) ||
+                          (state.leftTrigger != p.leftTrigger) ||
+                          (state.rightTrigger != p.rightTrigger);
+            }
+
+            bool refresh = false;
+            if (track.havePreviousState) {
+                ++track.framesSinceRefresh;
+                // At 250 Hz, 250 ticks ≈ 1 second
+                if (track.framesSinceRefresh >= 250) {
+                    track.framesSinceRefresh = 0;
+                    refresh = true;
+                }
+            }
+
+            if (changed || refresh) {
+                // If Guide chord is pulsing, neutralize sticks and triggers
+                ps4::ControllerState outState = state;
+                if (track.guideChord.phase == GuideChordState::Phase::Neutral ||
+                    track.guideChord.phase == GuideChordState::Phase::Pulse) {
+                    outState.leftStickX = outState.leftStickY = 0;
+                    outState.rightStickX = outState.rightStickY = 0;
+                    outState.leftTrigger = outState.rightTrigger = 0;
+                }
+                sendMultiState(static_cast<short>(i), currentMask, outState, flags);
+                track.previousState = state;
+                track.lastSentFlags = flags;
+                track.havePreviousState = true;
+
+                if (!track.firstPacketSent) {
+                    track.firstPacketSent = true;
+                    if (!track.firstPacketLogged) {
+                        track.firstPacketLogged = true;
+                        char buf[96];
+                        snprintf(buf, sizeof(buf), "[input] first packet sent for controller %d", i);
+                        cisDiagPrint(buf);
+                    }
+                }
+            }
+
+            // Stream IMU motion reports if enabled
+            if (gyroMotionEnabled && state.hasMotionData) {
+                LiSendControllerMotionEvent(static_cast<uint8_t>(i),
+                                            LI_MOTION_TYPE_GYRO,
+                                            state.gyroX, state.gyroY, state.gyroZ);
+                LiSendControllerMotionEvent(static_cast<uint8_t>(i),
+                                            LI_MOTION_TYPE_ACCEL,
+                                            state.accelX, state.accelY, state.accelZ);
+            }
+        }
+
+        // Process mouse emulation
+        if (mouseEmulationEnabled && state0Valid) {
+            processMouseEmulation(state0);
+        }
+    }
+
+    // Poller thread function
+    static void* pollerThreadFunc(void* arg) {
+        Impl* impl = static_cast<Impl*>(arg);
+        cisDiagPrint("[input] 250 Hz input streaming thread started");
+        while (!impl->pollerStop.load()) {
+            if (impl->state == ControllerInputStreamingState::Active &&
+                impl->inputReady && impl->inputManager) {
+                impl->inputManager->poll();
+                impl->pollAndStreamControllers();
+            }
+            sceKernelUsleep(4000); // 4 ms cadence = 250 Hz
+        }
+        cisDiagPrint("[input] 250 Hz input streaming thread stopped");
+        return nullptr;
     }
 };
 
@@ -745,11 +1081,7 @@ void ControllerInputStreaming::shutdown() {
         return;
     }
 
-    // Stop keyboard/mouse reception if still active.
-    if (m_impl->inputManager) {
-        m_impl->inputManager->stopKeyboard();
-        m_impl->inputManager->stopMouse();
-    }
+    stop();
 
     m_impl->inputManager = nullptr;
     m_impl->streamSessionManager = nullptr;
@@ -764,9 +1096,13 @@ void ControllerInputStreaming::shutdown() {
         m_impl->heldKeys[i] = false;
     }
     m_impl->mouseEmulationEnabled = false;
-    m_impl->havePrevTouch = false;
-    m_impl->prevTouchX = 0;
-    m_impl->prevTouchY = 0;
+    m_impl->touchMode = Impl::TouchMode::None;
+    m_impl->trackedFingerIds[0] = m_impl->trackedFingerIds[1] = 0;
+    m_impl->accPointerX = m_impl->accPointerY = 0.0f;
+    m_impl->accScrollX = m_impl->accScrollY = 0.0f;
+    m_impl->twoFingerTravel = 0.0f;
+    m_impl->touchLeftClickHeld = false;
+    m_impl->touchRightClickHeld = false;
     m_impl->heldEmulatedMouseButtons = 0;
     m_impl->prevMouseAssistChordHeld = false;
 }
@@ -776,7 +1112,9 @@ void ControllerInputStreaming::shutdown() {
 // ---------------------------------------------------------------------------
 
 void ControllerInputStreaming::start(uint32_t sessionGeneration,
-                                     bool mouseEmulationEnabled) {
+                                     bool mouseEmulationEnabled,
+                                     bool swapFaceButtons,
+                                     bool gyroMotionEnabled) {
     if (!m_impl->initialized) {
         return;
     }
@@ -785,17 +1123,23 @@ void ControllerInputStreaming::start(uint32_t sessionGeneration,
     m_impl->sessionGeneration = sessionGeneration;
     m_impl->inputReady = false;
     m_impl->inputReadyLogged = false;
+    m_impl->swapFaceButtons = swapFaceButtons;
+    m_impl->gyroMotionEnabled = gyroMotionEnabled;
     m_impl->resetControllers();
     m_impl->heldMouseButtons = 0;
     for (int i = 0; i < 256; ++i) {
         m_impl->heldKeys[i] = false;
     }
     m_impl->mouseEmulationEnabled = mouseEmulationEnabled;
-    m_impl->havePrevTouch = false;
-    m_impl->prevTouchX = 0;
-    m_impl->prevTouchY = 0;
     m_impl->heldEmulatedMouseButtons = 0;
     m_impl->prevMouseAssistChordHeld = false;
+    m_impl->touchMode = Impl::TouchMode::None;
+    m_impl->trackedFingerIds[0] = m_impl->trackedFingerIds[1] = 0;
+    m_impl->accPointerX = m_impl->accPointerY = 0.0f;
+    m_impl->accScrollX = m_impl->accScrollY = 0.0f;
+    m_impl->twoFingerTravel = 0.0f;
+    m_impl->touchLeftClickHeld = false;
+    m_impl->touchRightClickHeld = false;
 
     // Start keyboard and mouse reception (only while a stream is active).
     if (m_impl->inputManager) {
@@ -805,17 +1149,36 @@ void ControllerInputStreaming::start(uint32_t sessionGeneration,
 
     m_impl->state = ControllerInputStreamingState::Active;
 
-    char buf[128];
+    // Launch 250 Hz background input streaming poller thread
+    m_impl->pollerStop.store(false);
+    if (pthread_create(&m_impl->pollerThread, nullptr, Impl::pollerThreadFunc, m_impl) == 0) {
+        m_impl->pollerRunning = true;
+    } else {
+        cisDiagPrint("[input] warning: failed to create 250 Hz poller thread, falling back to 60 Hz");
+        m_impl->pollerRunning = false;
+    }
+
+    char buf[160];
     snprintf(buf, sizeof(buf),
-             "[input] controller streaming start generation=%u mouseEmulation=%d",
+             "[input] controller streaming start generation=%u mouseEmulation=%d swapFace=%d gyro=%d 250Hz=%d",
              static_cast<unsigned>(sessionGeneration),
-             mouseEmulationEnabled ? 1 : 0);
+             mouseEmulationEnabled ? 1 : 0,
+             swapFaceButtons ? 1 : 0,
+             gyroMotionEnabled ? 1 : 0,
+             m_impl->pollerRunning ? 1 : 0);
     cisDiagPrint(buf);
 }
 
 void ControllerInputStreaming::stop() {
     if (!m_impl->initialized) {
         return;
+    }
+
+    // Stop 250 Hz poller thread first
+    if (m_impl->pollerRunning) {
+        m_impl->pollerStop.store(true);
+        pthread_join(m_impl->pollerThread, nullptr);
+        m_impl->pollerRunning = false;
     }
 
     // If the connection is still usable, send neutral controller states for all
@@ -843,9 +1206,6 @@ void ControllerInputStreaming::stop() {
         m_impl->heldKeys[i] = false;
     }
     m_impl->mouseEmulationEnabled = false;
-    m_impl->havePrevTouch = false;
-    m_impl->prevTouchX = 0;
-    m_impl->prevTouchY = 0;
     m_impl->heldEmulatedMouseButtons = 0;
     m_impl->prevMouseAssistChordHeld = false;
 
@@ -868,15 +1228,11 @@ void ControllerInputStreaming::update() {
     }
 
     // --- Session generation gating ------------------------------------------
-    // Only forward for the exact generation this module started for. Do not
-    // send into stale or newer generations.
     if (ssm->currentSessionGeneration() != m_impl->sessionGeneration) {
         return;
     }
 
     // --- Input-readiness gating ---------------------------------------------
-    // The input channel is safe only when the stream is fully established
-    // (state == Streaming). Do not send merely because start() was called.
     if (ssm->state() != StreamSessionState::Streaming) {
         return;
     }
@@ -889,135 +1245,13 @@ void ControllerInputStreaming::update() {
         }
     }
 
-    // --- Read controller 0 snapshot for chords / mouse emulation ------------
-    ps4::ControllerState state0;
-    bool state0Valid = m_impl->inputManager &&
-                       m_impl->inputManager->latestControllerState(state0, 0);
-
-    // --- Mouse-assist toggle chord (Options + TouchPad Click on Controller 1) -
-    // Toggle controller-assisted mouse emulation on the rising edge of the
-    // chord. Pinned strictly to Controller 1 so player 2 cannot inadvertently toggle.
-    if (state0Valid) {
-        const bool chordHeld =
-            (state0.buttons & kRawOptions) && (state0.buttons & kRawTouchpad);
-        if (chordHeld && !m_impl->prevMouseAssistChordHeld) {
-            m_impl->mouseEmulationEnabled = !m_impl->mouseEmulationEnabled;
-            if (!m_impl->mouseEmulationEnabled) {
-                m_impl->releaseEmulatedMouseButtons();
-            }
-            char buf[96];
-            snprintf(buf, sizeof(buf),
-                     "[input] mouse assist toggled %s",
-                     m_impl->mouseEmulationEnabled ? "ON" : "OFF");
-            cisDiagPrint(buf);
-        }
-        m_impl->prevMouseAssistChordHeld = chordHeld;
+    // If 250 Hz background poller is NOT running, stream on the main thread
+    if (!m_impl->pollerRunning) {
+        m_impl->pollAndStreamControllers();
     }
 
-    // --- Process all controller slots (Player 1 + Player 2 up to 4) ---------
-    for (int i = 0; i < Impl::kMaxControllers; ++i) {
-        Impl::ControllerTrack& track = m_impl->controllers[i];
-        ps4::ControllerState state;
-        bool isConnected = m_impl->inputManager &&
-                           m_impl->inputManager->latestControllerState(state, i) &&
-                           state.connected;
-
-        // Disconnect detection
-        if (track.wasConnected && !isConnected) {
-            track.wasConnected = false;
-            track.havePreviousState = false;
-            track.arrivalSent = false;
-            track.framesSinceRefresh = 0;
-            uint16_t newMask = m_impl->computeActiveGamepadMask();
-            m_impl->sendMultiNeutralState(static_cast<short>(i), newMask);
-            char buf[96];
-            snprintf(buf, sizeof(buf), "[input] controller %d disconnected — neutral sent", i);
-            cisDiagPrint(buf);
-            continue;
-        }
-
-        if (!isConnected) {
-            continue;
-        }
-
-        // New connection / Arrival detection
-        bool isNewConnection = !track.wasConnected;
-        if (isNewConnection) {
-            track.wasConnected = true;
-            uint16_t mask = m_impl->computeActiveGamepadMask();
-            if (!track.arrivalSent) {
-                LiSendControllerArrivalEvent(static_cast<uint8_t>(i),
-                                             mask,
-                                             LI_CTYPE_PS,
-                                             0xFFFFFFFF,
-                                             LI_CCAP_ANALOG_TRIGGERS | LI_CCAP_RUMBLE | LI_CCAP_RGB_LED);
-                track.arrivalSent = true;
-            }
-            char buf[96];
-            snprintf(buf, sizeof(buf), "[input] controller %d connected/arrived (mask=0x%04X)", i, mask);
-            cisDiagPrint(buf);
-        }
-
-        uint16_t currentMask = m_impl->computeActiveGamepadMask();
-        const bool isPrimary = (i == 0);
-        const bool mouseEmulationActive = isPrimary && m_impl->mouseEmulationEnabled;
-
-        // Evaluate button flags and chord state machines every frame so timed
-        // pulses (L1+R1+Options -> PS/Guide and buffered Options on P1) advance
-        // and terminate on exact frame boundaries even when physical buttons
-        // are held completely still.
-        const int flags = Impl::buildButtonFlags(
-            state, isPrimary, mouseEmulationActive,
-            track.guideChord, track.exitChord);
-
-        // Change detection (includes host-visible button flag transitions from
-        // chord state machines).
-        bool changed = !track.havePreviousState || isNewConnection ||
-                       (flags != track.lastSentFlags);
-        if (track.havePreviousState && !changed) {
-            const ps4::ControllerState& p = track.previousState;
-            changed = (state.buttons != p.buttons) ||
-                      (state.leftStickX != p.leftStickX) ||
-                      (state.leftStickY != p.leftStickY) ||
-                      (state.rightStickX != p.rightStickX) ||
-                      (state.rightStickY != p.rightStickY) ||
-                      (state.leftTrigger != p.leftTrigger) ||
-                      (state.rightTrigger != p.rightTrigger);
-        }
-
-        // Periodic refresh
-        bool refresh = false;
-        if (track.havePreviousState) {
-            ++track.framesSinceRefresh;
-            if (track.framesSinceRefresh >= kRefreshIntervalFrames) {
-                track.framesSinceRefresh = 0;
-                refresh = true;
-            }
-        }
-
-        if (changed || refresh) {
-            m_impl->sendMultiState(static_cast<short>(i), currentMask, state, flags);
-            track.previousState = state;
-            track.lastSentFlags = flags;
-            track.havePreviousState = true;
-
-            if (!track.firstPacketSent) {
-                track.firstPacketSent = true;
-                if (!track.firstPacketLogged) {
-                    track.firstPacketLogged = true;
-                    char buf[96];
-                    snprintf(buf, sizeof(buf), "[input] first packet sent for controller %d", i);
-                    cisDiagPrint(buf);
-                }
-            }
-        }
-    }
-
-    // --- Keyboard/mouse forwarding ------------------------------------------
-    // Poll and forward keyboard/mouse events. These are only forwarded while
-    // the input channel is ready (gated above).
+    // Keyboard/mouse forwarding runs on the main thread
     if (m_impl->inputManager) {
-        // Poll the IME keyboard and drain pending events.
         m_impl->inputManager->pollKeyboard();
         ps4::KeyboardEvent keyEvents[16];
         int nKeys = m_impl->inputManager->takeKeyboardEvents(keyEvents, 16);
@@ -1025,23 +1259,12 @@ void ControllerInputStreaming::update() {
             m_impl->sendKeyboardEvent(keyEvents[i]);
         }
 
-        // Poll the mouse and drain pending events.
         m_impl->inputManager->pollMouse();
         ps4::MouseEvent mouseEvents[16];
         int nMice = m_impl->inputManager->takeMouseEvents(mouseEvents, 16);
         for (int i = 0; i < nMice; ++i) {
             m_impl->sendMouseEvent(mouseEvents[i]);
         }
-    }
-
-    // --- Controller-assisted mouse emulation --------------------------------
-    // When enabled, touchpad movement acts as a relative mouse and Cross/
-    // Circle act as left/right mouse buttons. Cross/Circle are consumed as
-    // mouse buttons (not forwarded as controller A/B by buildButtonFlags).
-    // Touchpad click remains reserved for the Back/Start mapping and is NOT
-    // used for mouse emulation.
-    if (m_impl->mouseEmulationEnabled && m_impl->inputReady && state0Valid) {
-        m_impl->processMouseEmulation(state0);
     }
 }
 
