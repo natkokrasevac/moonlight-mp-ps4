@@ -170,6 +170,12 @@ struct SettingsViewState {
     /// Show "Quit App" dialog (ON/OFF). When OFF, quitting an app (Triangle)
     /// or quitting-and-launching a different app proceeds without a dialog.
     bool showQuitAppDialog = true;
+    /// Stick deadzone percentage (0, 5, 8, 10, 15, 20).
+    int  stickDeadzonePercent = 8;
+    /// Swap face buttons: Cross <-> Circle (A <-> B) and Square <-> Triangle (X <-> Y).
+    bool swapFaceButtons = false;
+    /// Gyro motion reporting toggle (Off/On).
+    bool gyroMotionEnabled = true;
 };
 
 // ---------------------------------------------------------------------------

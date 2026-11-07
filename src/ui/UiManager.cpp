@@ -1284,6 +1284,15 @@ bool UiManager::buildSettingsRenderState(SettingsRenderState& out) const {
     addRow("Game Optimization",
            m_impl->settingsView.optimizeGameSettings ? "On" : "Off",
            true, 9);
+    char deadzoneStr[16];
+    snprintf(deadzoneStr, sizeof(deadzoneStr), "%d%%", m_impl->settingsView.stickDeadzonePercent);
+    addRow("Stick Deadzone", deadzoneStr, true, 10);
+    addRow("Swap Face Buttons",
+           m_impl->settingsView.swapFaceButtons ? "On" : "Off",
+           true, 11);
+    addRow("Gyro Motion",
+           m_impl->settingsView.gyroMotionEnabled ? "On" : "Off",
+           true, 12);
 
     out = std::move(state);
     return true;
@@ -1830,7 +1839,7 @@ void UiManager::processInput(const UiInput& input) {
         if (input.upPressed && m_impl->settingsSelectedRow > 0) {
             m_impl->settingsSelectedRow--;
         }
-        if (input.downPressed && m_impl->settingsSelectedRow < 9) {
+        if (input.downPressed && m_impl->settingsSelectedRow < 12) {
             m_impl->settingsSelectedRow++;
         }
         if (m_impl->settingsSelectedRow != prevRow) {
@@ -2321,6 +2330,26 @@ void UiManager::Impl::cycleSettingsRow(int rowIndex, int direction) {
         break;
     case 9:
         settingsView.optimizeGameSettings = !settingsView.optimizeGameSettings;
+        break;
+    case 10: {
+        static const int kDeadzones[] = { 0, 5, 8, 10, 15, 20 };
+        const int numDeadzones = static_cast<int>(sizeof(kDeadzones) / sizeof(kDeadzones[0]));
+        int currentIndex = 2; // Default 8%
+        for (int i = 0; i < numDeadzones; ++i) {
+            if (kDeadzones[i] == settingsView.stickDeadzonePercent) {
+                currentIndex = i;
+                break;
+            }
+        }
+        currentIndex = (currentIndex + step + numDeadzones) % numDeadzones;
+        settingsView.stickDeadzonePercent = kDeadzones[currentIndex];
+        break;
+    }
+    case 11:
+        settingsView.swapFaceButtons = !settingsView.swapFaceButtons;
+        break;
+    case 12:
+        settingsView.gyroMotionEnabled = !settingsView.gyroMotionEnabled;
         break;
     default:
         break;

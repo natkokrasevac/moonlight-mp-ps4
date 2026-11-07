@@ -100,6 +100,7 @@ float SettingsRenderer::rowTop(int rowIndex) const {
     // Rows 6-7 (Presentation Style, Show Quit App Dialog) are under the CLIENT
     // header.
     // Rows 8-9 (Speakers, Game Optimization) are under the HOST header.
+    // Rows 10-12 (Stick Deadzone, Swap Face Buttons, Gyro Motion) are under the GAMEPAD header.
     const float baseY = panelY() + margin() + titleBlockHeight() + sectionHeaderHeight();
     if (rowIndex <= 5) {
         return baseY + rowIndex * rowHeight();
@@ -113,7 +114,13 @@ float SettingsRenderer::rowTop(int rowIndex) const {
     // Rows 8-9: after row 7, a separator, and the HOST header.
     const float hostRowTop =
         clientRowTop + 2 * rowHeight() + separatorHeight() + sectionHeaderHeight();
-    return hostRowTop + (rowIndex - 8) * rowHeight();
+    if (rowIndex <= 9) {
+        return hostRowTop + (rowIndex - 8) * rowHeight();
+    }
+    // Rows 10-12: after row 9, a separator, and the GAMEPAD header.
+    const float gamepadRowTop =
+        hostRowTop + 2 * rowHeight() + separatorHeight() + sectionHeaderHeight();
+    return gamepadRowTop + (rowIndex - 10) * rowHeight();
 }
 
 ps4::Rect SettingsRenderer::rowBounds(int rowIndex) const {
@@ -200,6 +207,18 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
         drawRow(state.rows[i], i, rowTop(i), comp);
     }
 
+    // "GAMEPAD" section header.
+    const float gamepadHeaderY = rowTop(10) - sectionHeaderHeight();
+    m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
+                                 baselineY, lineHeight);
+    comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kGamepadSection,
+                  contentX, gamepadHeaderY + baselineY, 200, 200, 210);
+
+    // Rows 10-12 (Stick Deadzone, Swap Face Buttons, Gyro Motion) under GAMEPAD.
+    for (int i = 10; i < 13 && i < static_cast<int>(state.rows.size()); ++i) {
+        drawRow(state.rows[i], i, rowTop(i), comp);
+    }
+
     // --- Footer (app name + version) ---------------------------------------
     // Two small lines pinned to the bottom of the panel, using the
     // RegularSmall face.
@@ -243,6 +262,11 @@ void SettingsRenderer::drawSeparators(ps4::UiCompositor& comp) {
     // same gap to the heading as the STREAM heading has.
     const float hostSepY = rowTop(8) - sectionHeaderHeight() - 8.0f;
     comp.fillRect(px, static_cast<int>(hostSepY), pw, 2,
+                  UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
+
+    // Separator between HOST and GAMEPAD sections.
+    const float gamepadSepY = rowTop(10) - sectionHeaderHeight() - 8.0f;
+    comp.fillRect(px, static_cast<int>(gamepadSepY), pw, 2,
                   UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
 }
 

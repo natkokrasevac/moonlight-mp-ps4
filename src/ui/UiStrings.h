@@ -153,6 +153,8 @@ constexpr const char* kStreamSection = "STREAM";
 constexpr const char* kClientSection = "CLIENT";
 /// HOST (settings section header). Used by the Settings panel.
 constexpr const char* kHostSection = "HOST";
+/// GAMEPAD (settings section header). Used by the Settings panel.
+constexpr const char* kGamepadSection = "GAMEPAD";
 /// Planned (disabled-row value). Used by the Settings panel.
 constexpr const char* kPlanned = "Planned";
 

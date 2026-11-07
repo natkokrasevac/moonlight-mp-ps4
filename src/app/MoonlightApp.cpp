@@ -513,6 +513,9 @@ AppResult MoonlightApp::initialize() {
                  "[app] InputManager initialized (crossIsAccept=%d)",
                  m_input->isCrossAccept() ? 1 : 0);
         diagPrint(buf);
+        if (m_settingsManager) {
+            m_input->setStickDeadzone(m_settingsManager->settings().stickDeadzonePercent);
+        }
     }
 
     // 8. Initialize the production UiManager.
@@ -5439,9 +5442,13 @@ void MoonlightApp::startStreamSession(const ml::StreamSessionDescriptor& session
     // state == Streaming). Mouse emulation always starts OFF and can be
     // toggled in-stream via Options + TouchPad Click.
     if (m_controllerInputStreaming) {
+        const bool swapFaceButtons = m_settingsManager ? m_settingsManager->settings().swapFaceButtons : false;
+        const bool gyroMotionEnabled = m_settingsManager ? m_settingsManager->settings().gyroMotionEnabled : true;
         m_controllerInputStreaming->start(
             m_streamSessionManager->currentSessionGeneration(),
-            false);
+            false,
+            swapFaceButtons,
+            gyroMotionEnabled);
     }
 
     diagPrint("[stream] session handoff accepted — LiStartConnection scheduled on worker");
@@ -6019,6 +6026,9 @@ void MoonlightApp::openSettingsOverlay() {
     if (!m_isPro && view.codecIndex == 2) {
         view.codecIndex = 0;
     }
+    view.stickDeadzonePercent = s.stickDeadzonePercent;
+    view.swapFaceButtons = s.swapFaceButtons;
+    view.gyroMotionEnabled = s.gyroMotionEnabled;
     m_ui->setSettingsView(view);
 
     m_settingsOverlayOpen = true;
@@ -6058,7 +6068,14 @@ void MoonlightApp::closeSettingsOverlay(const ui::SettingsViewState& edited) {
     s.codec = (edited.codecIndex == 1) ? ml::StreamCodec::H264 :
               (edited.codecIndex == 2) ? ml::StreamCodec::H265 :
                                          ml::StreamCodec::Auto;
+    s.stickDeadzonePercent = edited.stickDeadzonePercent;
+    s.swapFaceButtons = edited.swapFaceButtons;
+    s.gyroMotionEnabled = edited.gyroMotionEnabled;
     m_settingsManager->setSettings(s);
+
+    if (m_input) {
+        m_input->setStickDeadzone(s.stickDeadzonePercent);
+    }
 
     // Push the authoritative presentation style to the UI manager so the
     // Host/App List renders in the committed mode.

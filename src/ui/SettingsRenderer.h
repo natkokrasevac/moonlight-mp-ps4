@@ -105,19 +105,20 @@ public:
 private:
     // --- Layout geometry ----------------------------------------------------
     float panelW() const { return 960.0f; }
-    float panelH() const { return 920.0f; }
+    float panelH() const { return 940.0f; }
     float panelX() const { return (1920.0f - panelW()) * 0.5f; }
     float panelY() const { return (1080.0f - panelH()) * 0.5f; }
-    float margin() const { return 28.0f; }
-    float rowHeight() const { return 52.0f; }
-    float titleBlockHeight() const { return 56.0f; }
-    float sectionHeaderHeight() const { return 36.0f; }
-    float separatorHeight() const { return 36.0f; }
+    float margin() const { return 24.0f; }
+    float rowHeight() const { return 44.0f; }
+    float titleBlockHeight() const { return 48.0f; }
+    float sectionHeaderHeight() const { return 32.0f; }
+    float separatorHeight() const { return 28.0f; }
 
     /// The Y position of the top of the row at `rowIndex`. Rows 0-5 are under
     /// the STREAM header; rows 6-7 (Presentation Style, Show Quit App Dialog)
     /// are under the CLIENT header; rows 8-9 (Speakers, Game Optimization) are
-    /// under the HOST header.
+    /// under the HOST header; rows 10-12 (Stick Deadzone, Swap Face Buttons,
+    /// Gyro Motion) are under the GAMEPAD header.
     float rowTop(int rowIndex) const;
 
     /// Draw a single row into `comp` at the given Y position.

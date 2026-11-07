@@ -304,6 +304,29 @@ bool SettingsManager::initialize() {
             continue;
         }
 
+        // --- stick_deadzone ------------------------------------------------
+        if (strncmp(key, "stick_deadzone", keyLen) == 0 && keyLen == 14) {
+            long v = strtol(value, nullptr, 10);
+            if (v >= 0 && v <= 25) {
+                m_impl->settings.stickDeadzonePercent = static_cast<int>(v);
+            }
+            continue;
+        }
+
+        // --- swap_face_buttons ---------------------------------------------
+        if (strncmp(key, "swap_face_buttons", keyLen) == 0 && keyLen == 17) {
+            long v = strtol(value, nullptr, 10);
+            m_impl->settings.swapFaceButtons = (v == 1);
+            continue;
+        }
+
+        // --- gyro_motion ---------------------------------------------------
+        if (strncmp(key, "gyro_motion", keyLen) == 0 && keyLen == 11) {
+            long v = strtol(value, nullptr, 10);
+            m_impl->settings.gyroMotionEnabled = (v != 0);
+            continue;
+        }
+
         // Unknown key — ignored.
     }
 
@@ -403,6 +426,9 @@ bool SettingsManager::save() {
     fprintf(f, "mute_host_speakers=%d\n", muteHost);
     fprintf(f, "optimize_game_settings=%d\n", optimize);
     fprintf(f, "show_quit_app_dialog=%d\n", showQuitDialog);
+    fprintf(f, "stick_deadzone=%d\n", m_impl->settings.stickDeadzonePercent);
+    fprintf(f, "swap_face_buttons=%d\n", m_impl->settings.swapFaceButtons ? 1 : 0);
+    fprintf(f, "gyro_motion=%d\n", m_impl->settings.gyroMotionEnabled ? 1 : 0);
 
     if (fflush(f) != 0) {
         fclose(f);

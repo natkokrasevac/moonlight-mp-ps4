@@ -120,6 +120,12 @@ struct Settings {
     /// an app (Triangle) or before quitting-and-launching a different app.
     /// When false, quitting proceeds immediately without a dialog. Default ON.
     bool             showQuitAppDialog = true;
+    /// Stick deadzone percentage: 0..25% (default 8%).
+    int              stickDeadzonePercent = 8;
+    /// Swap Cross and Circle face buttons on the host (Cross -> B, Circle -> A). Default false.
+    bool             swapFaceButtons = false;
+    /// Enable gyro and accelerometer motion reports to the host. Default true.
+    bool             gyroMotionEnabled = true;
 };
 
 // ---------------------------------------------------------------------------
