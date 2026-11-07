@@ -1,15 +1,16 @@
 // Copyright (C) 2026 fourletterworkshop.com
-// This file is part of Moonlight DX for PlayStation 4.
-// Moonlight DX for PlayStation 4 is free software: you can redistribute it
+// Copyright (C) 2026 natko (github.com/natkokrasevac)
+// This file is part of Moonlight MP for PlayStation 4.
+// Moonlight MP for PlayStation 4 is free software: you can redistribute it
 // and/or modify it under the terms of the GNU General Public License as
 // published by the Free Software Foundation, either version 3 of the License,
 // or (at your option) any later version.
-// Moonlight DX for PlayStation 4 is distributed in the hope that it will be
+// Moonlight MP for PlayStation 4 is distributed in the hope that it will be
 // useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
 // Public License for more details.
 // You should have received a copy of the GNU General Public License along with
-// Moonlight DX for PlayStation 4. If not, see <https://www.gnu.org/licenses/>.
+// Moonlight MP for PlayStation 4. If not, see <https://www.gnu.org/licenses/>.
 //
 
 // === UiStrings.h ============================================================
@@ -135,7 +136,7 @@ constexpr const char* kHelpMouseButtons = "Mouse buttons are [Cross] (Left) and 
 /// Keyboard/mouse passthrough (Help note). Used by the Help screen.
 constexpr const char* kHelpKeyboardMouse = "Keyboards and Mice attached to PlayStation 4 are passed through, tested with USB and Bluetooth devices.";
 /// Bluetooth mouse note (Help note). Used by the Help screen.
-constexpr const char* kHelpBluetoothNote = "Note: Most modern Bluetooth mice will not pair with PlayStation 4. See my keyparty project on fourletterworkshop.com";
+constexpr const char* kHelpBluetoothNote = "Note: Most modern Bluetooth mice will not pair with PlayStation 4.";
 /// Settings saved (Help note). Used by the Help screen.
 constexpr const char* kHelpSettingsSaved = "Settings are saved when settings overlay is closed.";
 /// VSYNC / Frame Pacing / Pro support (Help note). Used by the Help screen.
@@ -143,7 +144,7 @@ constexpr const char* kHelpVsyncFramePacing = "There are currently no settings f
 /// More details (Help footer). Used by the Help screen.
 constexpr const char* kHelpMoreDetails = "Thank you to the OpenOrbis and Moonlight projects.";
 /// Copyright/license note (Help footer). Used by the Help screen.
-constexpr const char* kHelpCopyright = "Copyright (C) 2006 fourletterworkshop.com. Released under the GNU General Public License v3.0. This program comes with ABSOLUTELY NO WARRANTY.";
+constexpr const char* kHelpCopyright = "Copyright (C) 2026 fourletterworkshop.com & natko. Released under the GNU General Public License v3.0. This program comes with ABSOLUTELY NO WARRANTY.";
 
 // --- Settings section headers ----------------------------------------------
 /// STREAM (settings section header). Used by the Settings panel.
@@ -159,7 +160,7 @@ constexpr const char* kPlanned = "Planned";
 /// App name (Settings footer). Used by the Settings panel footer.
 constexpr const char* kAppName = "Moonlight MP for PlayStation 4";
 /// Version label (Settings footer). Used by the Settings panel footer.
-constexpr const char* kVersionLabel = "fourletterworkshop.com";
+constexpr const char* kVersionLabel = "github.com/natkokrasevac";
 /// Version number (Settings footer). Used by the Settings panel footer.
 constexpr const char* kVersionNumber = "2.51";
 

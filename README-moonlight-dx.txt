@@ -5,7 +5,7 @@ Version 2.51
 This is an unofficial Moonlight client for PlayStation 4 with multi-controller support (MP).
 
 The most recent build can be found at 
-https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4
+https://github.com/natkokrasevac/moonlight-mp-ps4
 
 Features
 ~~~~~~~~

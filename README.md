@@ -2,7 +2,7 @@
 
 **Moonlight MP** is an enhanced, open-source Moonlight Game Streaming client for jailbroken PlayStation 4 and PS4 Pro consoles. Built for local co-op and remote streaming, it brings **4-player multiplayer support**, **dual-motor rumble**, **dynamic light bar feedback**, **active controller indicators**, **DDNS/hostname manual pairing**, and **isolated side-by-side storage**.
 
-> Based on the original **Moonlight DX for PlayStation 4** developed by [Four Letter Workshop](https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4).
+> Developed and maintained by **[natko](https://github.com/natkokrasevac/moonlight-mp-ps4)**. Based on the original **Moonlight DX for PlayStation 4** by [Four Letter Workshop](https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4).
 
 ---
 
@@ -115,6 +115,7 @@ make
 
 ## Credits & License
 
-- Original PS4 client created by **[Four Letter Workshop](https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4)**.
+- Developed and maintained by **[natko](https://github.com/natkokrasevac/moonlight-mp-ps4)**.
+- Based on the original Moonlight DX for PS4 by **[Four Letter Workshop](https://fourletterworkshop.com/projects/moonlight_dx_for_playstation_4)**.
 - Powered by [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c).
 - Open source under the [GNU General Public License v3.0](LICENSE).
