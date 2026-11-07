@@ -482,7 +482,7 @@ void* ApplicationSessionManager::launchWorker(void* arg) {
     // additionalStates, sops, rikey, rikeyid, localAudioPlayMode,
     // surroundAudioInfo, remoteControllersBitmap, gcmap, plus the canonical
     // corever parameter.
-    // remoteControllersBitmap / gcmap are 0 (no gamepads yet).
+    // remoteControllersBitmap / gcmap: bitmask of supported local controller slots (0x0F = 4 controllers)
     const char* endpoint = resume ? "resume" : "launch";
     std::string targetStr = std::string("/") + endpoint +
                     "?uniqueid=" + target.clientUniqueId +
@@ -495,8 +495,8 @@ void* ApplicationSessionManager::launchWorker(void* arg) {
                     "&rikeyid=" + std::to_string(rikeyid) +
                     "&localAudioPlayMode=" + std::to_string(localAudioPlayMode) +
                     "&surroundAudioInfo=" + std::to_string(surroundAudioInfo) +
-                    "&remoteControllersBitmap=0" +
-                    "&gcmap=0";
+                    "&remoteControllersBitmap=15" +
+                    "&gcmap=15";
 
     // Append the canonical launch query parameter (corever=1).
     targetStr += kCoreVerParameter;
