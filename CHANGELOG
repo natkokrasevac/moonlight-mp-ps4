@@ -1,3 +1,13 @@
+V2.60 - 2026-11-07
+	Add UTF-8 multi-byte codepoint decoding to FontRasterizer (fixes ™, symbols, and accents)
+	Add UTF-8 boundary-safe ellipsis truncation for long titles
+	Adjust card grid layout to cleanly fit 2 full rows (5x2 = 10 cards) without bottom legend overlap
+	Add text clipping to FontRasterizer/UiCompositor and redraw bar backgrounds to prevent bleed
+	Add aspect-cover (center crop) rendering for Desktop card and posters for uniform card sizes
+	Center on-screen keyboard (IME) dialog horizontally and vertically on display
+	Fix video decoder packet starvation during PC stream launch and IDR recovery
+	Schedule serverinfo query on stream exit to refresh resume/running status
+
 V2.51 - 2026-11-06
 	Native Options button mapping: physical Options sends Host Options / Start (PLAY_FLAG)
 	Host PS / Guide button mapped to clean L1 + R1 + Options chord with 80 ms pulse filter
