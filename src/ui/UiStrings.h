@@ -120,31 +120,40 @@ constexpr const char* kResetMoonlightConfirm = "Do you really want to reset Moon
 
 // --- Help screen content ---------------------------------------------------
 /// In-stream button assignments (Help section header). Used by the Help screen.
-constexpr const char* kHelpInStreamAssignments = "IN-STREAM BUTTON ASSIGNMENTS";
+constexpr const char* kHelpInStreamAssignments = "IN-STREAM SHORTCUTS & CONTROLS";
 /// PS/Share reserved note (Help note). Used by the Help screen.
-constexpr const char* kHelpPsShareReserved = "PS and Share buttons on the controller cannot be mapped and used in-stream as they are OS reserved.";
+constexpr const char* kHelpPsShareReserved = "PS and Share buttons on the controller cannot be mapped in-stream (PlayStation OS reserved).";
 /// Exit stream (Help instruction). Used by the Help screen.
-constexpr const char* kHelpExitStream = "To exit stream, hold [Options] + [L3] for 1 sec";
+constexpr const char* kHelpExitStream = "Exit Stream: Hold [Options] + [L3] for 1 second";
 /// PS button (Help instruction). Used by the Help screen.
-constexpr const char* kHelpPsButton = "For [PS] button, press L1 + R1 + [Options]";
+constexpr const char* kHelpPsButton = "Host Guide / Steam Overlay: Press L1 + R1 + [Options]";
 /// SELECT / START buttons (Help instruction). Used by the Help screen.
-constexpr const char* kHelpSelectStart = "For START / SELECT, press [Options] / [Touchpad]";
+constexpr const char* kHelpSelectStart = "Start / Select: Press [Options] for Start, Click [TouchpadL] (Left half) for Select";
+/// DS4 Touchpad click (Help instruction). Used by the Help screen.
+constexpr const char* kHelpTouchpadClick = "DualShock 4 Touchpad: Click [TouchpadR] (Right half of Touchpad)";
+
+/// Mouse emulation section header.
+constexpr const char* kHelpMouseSection = "MOUSE EMULATION MODE";
 /// Mouse emulation toggle (Help instruction). Used by the Help screen.
-constexpr const char* kHelpMouseEmulation = "Toggle Mouse Emulation On/Off with [Options] + [Touchpad]";
+constexpr const char* kHelpMouseEmulation = "Toggle Mouse Mode: Press [Options] + [Touchpad]";
+/// Mouse movement (Help instruction). Used by the Help screen.
+constexpr const char* kHelpMouseMovement = "Move Cursor: 1 finger drag on Touchpad, or Left Stick (hold R2 to speed up)";
 /// Mouse buttons (Help instruction). Used by the Help screen.
-constexpr const char* kHelpMouseButtons = "Mouse buttons are [Cross] (Left) and [Circle] (Right)";
+constexpr const char* kHelpMouseButtons = "Clicks: 1-finger click or [Cross] = Left, 2-finger click or [Circle] = Right, R3 = Middle";
+/// Mouse scrolling (Help instruction). Used by the Help screen.
+constexpr const char* kHelpMouseScroll = "Scroll: Drag 2 fingers vertically or horizontally on Touchpad";
+
+/// Hardware passthrough section header.
+constexpr const char* kHelpHardwareSection = "PASSTHROUGH & HARDWARE";
 /// Keyboard/mouse passthrough (Help note). Used by the Help screen.
-constexpr const char* kHelpKeyboardMouse = "Keyboards and Mice attached to PlayStation 4 are passed through, tested with USB and Bluetooth devices.";
-/// Bluetooth mouse note (Help note). Used by the Help screen.
-constexpr const char* kHelpBluetoothNote = "Note: Most modern Bluetooth mice will not pair with PlayStation 4.";
-/// Settings saved (Help note). Used by the Help screen.
-constexpr const char* kHelpSettingsSaved = "Settings are saved when settings overlay is closed.";
-/// VSYNC / Frame Pacing / Pro support (Help note). Used by the Help screen.
-constexpr const char* kHelpVsyncFramePacing = "There are currently no settings for VSYNC (ON) or Frame Pacing (OFF). PlayStation 4 Pro h265/4K support is planned.";
+constexpr const char* kHelpKeyboardMouse = "Keyboard and Mouse connected to PlayStation 4 (USB/Bluetooth) are passed through.";
+/// Motion & Deadzone note.
+constexpr const char* kHelpMotionNotice = "Controller Gyroscope (Motion) and Stick Deadzones can be tuned in Settings ([Options]).";
+
 /// More details (Help footer). Used by the Help screen.
 constexpr const char* kHelpMoreDetails = "Thank you to the OpenOrbis and Moonlight projects.";
 /// Copyright/license note (Help footer). Used by the Help screen.
-constexpr const char* kHelpCopyright = "Copyright (C) 2026 fourletterworkshop.com & natko. Released under the GNU General Public License v3.0. This program comes with ABSOLUTELY NO WARRANTY.";
+constexpr const char* kHelpCopyright = "Copyright (C) 2026 fourletterworkshop.com & natko. Released under GNU GPL v3.0.";
 
 // --- Settings section headers ----------------------------------------------
 /// STREAM (settings section header). Used by the Settings panel.

@@ -214,26 +214,38 @@ void HelpRenderer::drawPanel(const HelpRenderState& state,
         float indent;       ///< Horizontal indent (px) for this line.
     };
 
-    const float kSpacerH = 24.0f;
-    const float kIndent = 40.0f;
+    const float kSpacerH = 12.0f;
+    const float kSectionSpacerH = 20.0f;
+    const float kIndent = 32.0f;
     const HelpLine kLines[] = {
+        // Section 1: In-Stream Shortcuts & Controls
         {ps4::FontRasterizer::FontFace::Bold, UiStrings::kHelpInStreamAssignments, 0.0f, 0.0f},
         {ps4::FontRasterizer::FontFace::BoldSmall, UiStrings::kHelpPsShareReserved, 0.0f, 0.0f},
         {ps4::FontRasterizer::FontFace::Regular, nullptr, kSpacerH, 0.0f},
         {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpExitStream, 0.0f, kIndent},
         {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpPsButton, 0.0f, kIndent},
         {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpSelectStart, 0.0f, kIndent},
+        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpTouchpadClick, 0.0f, kIndent},
+        {ps4::FontRasterizer::FontFace::Regular, nullptr, kSectionSpacerH, 0.0f},
+
+        // Section 2: Mouse Emulation Mode
+        {ps4::FontRasterizer::FontFace::Bold, UiStrings::kHelpMouseSection, 0.0f, 0.0f},
+        {ps4::FontRasterizer::FontFace::Regular, nullptr, kSpacerH, 0.0f},
         {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpMouseEmulation, 0.0f, kIndent},
+        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpMouseMovement, 0.0f, kIndent},
         {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpMouseButtons, 0.0f, kIndent},
+        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpMouseScroll, 0.0f, kIndent},
+        {ps4::FontRasterizer::FontFace::Regular, nullptr, kSectionSpacerH, 0.0f},
+
+        // Section 3: Hardware Passthrough & Configuration
+        {ps4::FontRasterizer::FontFace::Bold, UiStrings::kHelpHardwareSection, 0.0f, 0.0f},
         {ps4::FontRasterizer::FontFace::Regular, nullptr, kSpacerH, 0.0f},
-        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpKeyboardMouse, 0.0f, 0.0f},
-        {ps4::FontRasterizer::FontFace::BoldSmall, UiStrings::kHelpBluetoothNote, 0.0f, 0.0f},
-        {ps4::FontRasterizer::FontFace::Regular, nullptr, kSpacerH, 0.0f},
-        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpSettingsSaved, 0.0f, 0.0f},
-        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpVsyncFramePacing, 0.0f, 0.0f},
-        {ps4::FontRasterizer::FontFace::Regular, nullptr, kSpacerH, 0.0f},
-        {ps4::FontRasterizer::FontFace::Bold, UiStrings::kHelpMoreDetails, 0.0f, 0.0f},
-        {ps4::FontRasterizer::FontFace::Regular, nullptr, 8.0f, 0.0f},
+        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpKeyboardMouse, 0.0f, kIndent},
+        {ps4::FontRasterizer::FontFace::Regular, UiStrings::kHelpMotionNotice, 0.0f, kIndent},
+        {ps4::FontRasterizer::FontFace::Regular, nullptr, kSectionSpacerH, 0.0f},
+
+        // Footer
+        {ps4::FontRasterizer::FontFace::BoldSmall, UiStrings::kHelpMoreDetails, 0.0f, 0.0f},
         {ps4::FontRasterizer::FontFace::RegularSmall, UiStrings::kHelpCopyright, 0.0f, 0.0f},
     };
     const size_t kLineCount = sizeof(kLines) / sizeof(kLines[0]);
