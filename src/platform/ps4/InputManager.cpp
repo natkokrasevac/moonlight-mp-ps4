@@ -233,6 +233,10 @@ struct InputManager::Impl {
         uint8_t ledR = 0;
         uint8_t ledG = 0;
         uint8_t ledB = 0;
+        uint16_t accelRateHz = 0;
+        uint16_t gyroRateHz = 0;
+        uint64_t lastAccelUs = 0;
+        uint64_t lastGyroUs = 0;
     };
 
     static constexpr int kSlotCount = InputManager::kMaxControllers;
@@ -240,10 +244,14 @@ struct InputManager::Impl {
     std::mutex padMutex;
     uint32_t pollCounter = 0;
     bool    initialized = false;
+    int     stickDeadzonePercent = 0;
 
     // --- Button state (combined across connected pads for UI navigation) ---
     uint32_t currentButtons = 0; ///< Current frame button bitmask.
     uint32_t previousButtons = 0; ///< Previous frame button bitmask.
+    uint32_t dpadRepeatButtons = 0;
+    uint64_t dpadRepeatStartUs = 0;
+    uint64_t dpadRepeatLastUs = 0;
 
     // --- Enter button assignment -------------------------------------------
     /// True when Cross is the "accept/enter" button (Western convention).
@@ -569,11 +577,21 @@ bool InputManager::isInitialized() const {
 // Analog conversion helpers
 // ---------------------------------------------------------------------------
 
+static inline int16_t applyStickDeadzone(int16_t value, int percent) {
+    if (percent <= 0) return value;
+    if (percent > 25) percent = 25;
+    int32_t threshold = 32768 * percent / 100;
+    int32_t magnitude = value < 0 ? -static_cast<int32_t>(value) : static_cast<int32_t>(value);
+    if (magnitude <= threshold) return 0;
+    int32_t scaled = (magnitude - threshold) * 32767 / (32768 - threshold);
+    return static_cast<int16_t>(value < 0 ? -scaled : scaled);
+}
+
 /// Convert an unsigned PS4 analog axis (0..255, center 128) to the signed
 /// Moonlight range (-32768..32767, center 0). Uses an int32_t intermediate to
 /// avoid int16 overflow. When `invertY` is true, the result is inverted so
 /// that PS4 "up" (low raw value) maps to Moonlight "up" (positive).
-static int16_t convertAxis(uint8_t raw, bool invertY) {
+static int16_t convertAxis(uint8_t raw, bool invertY, int deadzonePercent = 0) {
     int32_t v = (static_cast<int32_t>(raw) - 128) * 257;  // -32896..32639
     if (v > 32767) {
         v = 32767;
@@ -586,6 +604,9 @@ static int16_t convertAxis(uint8_t raw, bool invertY) {
         // Invert Y: up (positive) <-> down (negative). Avoid overflow on
         // INT16_MIN (which has no positive counterpart).
         out = (out == INT16_MIN) ? INT16_MAX : static_cast<int16_t>(-out);
+    }
+    if (deadzonePercent > 0) {
+        out = applyStickDeadzone(out, deadzonePercent);
     }
     return out;
 }
@@ -649,23 +670,46 @@ void InputManager::poll() {
             }
             ControllerState& s = slot.latestState;
             s.buttons = padData.buttons;
-            s.leftStickX  = convertAxis(padData.leftStick.x, false);
-            s.leftStickY  = convertAxis(padData.leftStick.y, true);
-            s.rightStickX = convertAxis(padData.rightStick.x, false);
-            s.rightStickY = convertAxis(padData.rightStick.y, true);
+            const int dz = m_impl->stickDeadzonePercent;
+            s.leftStickX  = convertAxis(padData.leftStick.x, false, dz);
+            s.leftStickY  = convertAxis(padData.leftStick.y, true, dz);
+            s.rightStickX = convertAxis(padData.rightStick.x, false, dz);
+            s.rightStickY = convertAxis(padData.rightStick.y, true, dz);
             s.leftTrigger  = padData.analogButtons.l2;
             s.rightTrigger = padData.analogButtons.r2;
             s.connected = (padData.connected != 0);
 
-            s.touchActive = (padData.touch.fingers > 0);
-            s.touchFingers = padData.touch.fingers;
+            s.touchFingers = padData.touch.fingers > 2 ? 2 : padData.touch.fingers;
+            s.touchActive = (s.touchFingers > 0);
+            for (int f = 0; f < 2; ++f) {
+                if (f < s.touchFingers) {
+                    s.touchPoints[f].id = padData.touch.touch[f].finger;
+                    s.touchPoints[f].active = true;
+                    s.touchPoints[f].x = static_cast<int16_t>(padData.touch.touch[f].x);
+                    s.touchPoints[f].y = static_cast<int16_t>(padData.touch.touch[f].y);
+                } else {
+                    s.touchPoints[f].id = 0;
+                    s.touchPoints[f].active = false;
+                    s.touchPoints[f].x = 0;
+                    s.touchPoints[f].y = 0;
+                }
+            }
             if (s.touchActive) {
-                s.touchX = static_cast<int16_t>(padData.touch.touch[0].x);
-                s.touchY = static_cast<int16_t>(padData.touch.touch[0].y);
+                s.touchX = s.touchPoints[0].x;
+                s.touchY = s.touchPoints[0].y;
             } else {
                 s.touchX = 0;
                 s.touchY = 0;
             }
+
+            // Motion sensor data (vel is rad/s, convert to deg/s; acell is m/s^2)
+            s.hasMotionData = true;
+            s.gyroX = padData.vel.x * 57.2957795f;
+            s.gyroY = padData.vel.y * 57.2957795f;
+            s.gyroZ = padData.vel.z * 57.2957795f;
+            s.accelX = padData.acell.x;
+            s.accelY = padData.acell.y;
+            s.accelZ = padData.acell.z;
 
             if (slot.connected) {
                 combinedButtons |= padData.buttons;
@@ -674,6 +718,28 @@ void InputManager::poll() {
     }
 
     m_impl->currentButtons = combinedButtons;
+
+    // D-pad hold auto-repeat (350 ms initial delay, then 90 ms repeat)
+    const uint32_t dpadMask = ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
+                              ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT;
+    uint32_t dpadHeld = combinedButtons & dpadMask;
+    uint32_t dpadPressed = dpadHeld & ~m_impl->previousButtons;
+    uint64_t nowUs = static_cast<uint64_t>(sceKernelGetProcessTime());
+
+    m_impl->dpadRepeatButtons = 0;
+    if (dpadHeld != 0) {
+        if (dpadPressed != 0) {
+            m_impl->dpadRepeatStartUs = nowUs;
+            m_impl->dpadRepeatLastUs = nowUs;
+        } else if (nowUs - m_impl->dpadRepeatStartUs > 350000ull &&
+                   nowUs - m_impl->dpadRepeatLastUs > 90000ull) {
+            m_impl->dpadRepeatButtons = dpadHeld;
+            m_impl->dpadRepeatLastUs = nowUs;
+        }
+    } else {
+        m_impl->dpadRepeatStartUs = 0;
+        m_impl->dpadRepeatLastUs = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +797,31 @@ void InputManager::setVibration(int controllerIndex, uint16_t lowFreqMotor, uint
     vibe.lgMotor = static_cast<uint8_t>(lowFreqMotor >> 8);
     vibe.smMotor = static_cast<uint8_t>(highFreqMotor >> 8);
     scePadSetVibration(handle, &vibe);
+}
+
+void InputManager::setMotionEventState(int controllerIndex, uint8_t motionType, uint16_t reportRateHz) {
+    if (!m_impl || controllerIndex < 0 || controllerIndex >= Impl::kSlotCount) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_impl->padMutex);
+    Impl::PadSlot& slot = m_impl->slots[controllerIndex];
+    if (motionType == 1) { // LI_MOTION_TYPE_ACCEL
+        slot.accelRateHz = reportRateHz;
+        slot.lastAccelUs = 0;
+    } else if (motionType == 2) { // LI_MOTION_TYPE_GYRO
+        slot.gyroRateHz = reportRateHz;
+        slot.lastGyroUs = 0;
+    }
+    char buf[128];
+    snprintf(buf, sizeof(buf), "[input] slot %d motion type %u rate %u Hz",
+             controllerIndex, static_cast<unsigned>(motionType), static_cast<unsigned>(reportRateHz));
+    inputDiagPrint(buf);
+}
+
+void InputManager::setStickDeadzone(int percent) {
+    if (!m_impl) return;
+    std::lock_guard<std::mutex> lock(m_impl->padMutex);
+    m_impl->stickDeadzonePercent = (percent < 0) ? 0 : (percent > 25 ? 25 : percent);
 }
 
 void InputManager::setLightBar(int controllerIndex, uint8_t r, uint8_t g, uint8_t b, bool overrideColor) {
@@ -1030,22 +1121,26 @@ static bool isJustPressed(uint32_t current, uint32_t previous, uint32_t mask) {
 
 bool InputManager::isUpJustPressed() const {
     return isJustPressed(m_impl->currentButtons, m_impl->previousButtons,
-                         ORBIS_PAD_BUTTON_UP);
+                         ORBIS_PAD_BUTTON_UP) ||
+           ((m_impl->dpadRepeatButtons & ORBIS_PAD_BUTTON_UP) != 0);
 }
 
 bool InputManager::isDownJustPressed() const {
     return isJustPressed(m_impl->currentButtons, m_impl->previousButtons,
-                         ORBIS_PAD_BUTTON_DOWN);
+                         ORBIS_PAD_BUTTON_DOWN) ||
+           ((m_impl->dpadRepeatButtons & ORBIS_PAD_BUTTON_DOWN) != 0);
 }
 
 bool InputManager::isLeftJustPressed() const {
     return isJustPressed(m_impl->currentButtons, m_impl->previousButtons,
-                         ORBIS_PAD_BUTTON_LEFT);
+                         ORBIS_PAD_BUTTON_LEFT) ||
+           ((m_impl->dpadRepeatButtons & ORBIS_PAD_BUTTON_LEFT) != 0);
 }
 
 bool InputManager::isRightJustPressed() const {
     return isJustPressed(m_impl->currentButtons, m_impl->previousButtons,
-                         ORBIS_PAD_BUTTON_RIGHT);
+                         ORBIS_PAD_BUTTON_RIGHT) ||
+           ((m_impl->dpadRepeatButtons & ORBIS_PAD_BUTTON_RIGHT) != 0);
 }
 
 bool InputManager::isAcceptJustPressed() const {

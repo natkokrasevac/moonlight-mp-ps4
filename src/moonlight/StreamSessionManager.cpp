@@ -329,7 +329,11 @@ void ssmClRumbleTriggers(uint16_t controllerNumber, uint16_t leftTriggerMotor,
 
 void ssmClSetMotionEventState(uint16_t controllerNumber, uint8_t motionType,
                               uint16_t reportRateHz) {
-    (void)controllerNumber; (void)motionType; (void)reportRateHz;
+    StreamSessionManager::Impl* owner = ssmGetActiveOwner();
+    if (owner && owner->inputManager) {
+        owner->inputManager->setMotionEventState(static_cast<int>(controllerNumber),
+                                                 motionType, reportRateHz);
+    }
 }
 
 void ssmClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b) {

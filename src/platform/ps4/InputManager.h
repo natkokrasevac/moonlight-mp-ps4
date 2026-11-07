@@ -90,14 +90,27 @@ struct ControllerState {
     uint8_t  leftTrigger = 0;   ///< 0..255 (0=released, 255=full).
     uint8_t  rightTrigger = 0;  ///< 0..255 (0=released, 255=full).
     bool     connected = false; ///< true if a controller is connected.
-    /// Touchpad state (first touch point). `touchActive` is true when at least
-    /// one finger is on the touchpad; `touchX`/`touchY` are the current
-    /// position valid only while `touchActive`. `touchFingers` is the number
-    /// of active touch points (0 when none).
-    bool     touchActive = false;
-    int16_t  touchX = 0;
-    int16_t  touchY = 0;
-    uint8_t  touchFingers = 0;
+    /// Touchpad state (up to 2 fingers on DualShock 4).
+    struct TouchPoint {
+        uint8_t id = 0;         ///< Finger identifier (0 = not tracked).
+        bool    active = false; ///< True if finger is touching the pad.
+        int16_t x = 0;          ///< X coordinate (0..1920).
+        int16_t y = 0;          ///< Y coordinate (0..942).
+    };
+    TouchPoint touchPoints[2];
+    bool     touchActive = false; ///< True when at least one finger is on the touchpad.
+    int16_t  touchX = 0;          ///< Primary finger X position (backward compatibility).
+    int16_t  touchY = 0;          ///< Primary finger Y position (backward compatibility).
+    uint8_t  touchFingers = 0;    ///< Number of active touch points (0..2).
+
+    /// Motion sensor state (gyroscope & accelerometer).
+    bool     hasMotionData = false;
+    float    gyroX = 0.0f;        ///< Angular velocity X in deg/s.
+    float    gyroY = 0.0f;        ///< Angular velocity Y in deg/s.
+    float    gyroZ = 0.0f;        ///< Angular velocity Z in deg/s.
+    float    accelX = 0.0f;       ///< Linear acceleration X in m/s^2.
+    float    accelY = 0.0f;       ///< Linear acceleration Y in m/s^2.
+    float    accelZ = 0.0f;       ///< Linear acceleration Z in m/s^2.
 };
 
 // ---------------------------------------------------------------------------
@@ -196,6 +209,14 @@ public:
     /// Set vibration / rumble for a controller slot (0 to kMaxControllers - 1).
     /// `lowFreqMotor` and `highFreqMotor` are in the 0..65535 range (Moonlight / XInput convention).
     void setVibration(int controllerIndex, uint16_t lowFreqMotor, uint16_t highFreqMotor);
+
+    /// Set host-requested motion sensing state for a controller slot.
+    /// `motionType`: 1 = LI_MOTION_TYPE_ACCEL, 2 = LI_MOTION_TYPE_GYRO.
+    /// `reportRateHz`: requested frequency (0 Hz = stop).
+    void setMotionEventState(int controllerIndex, uint8_t motionType, uint16_t reportRateHz);
+
+    /// Set analog stick deadzone percentage (0..25).
+    void setStickDeadzone(int percent);
 
     /// Set RGB light bar color for a controller slot (0 to kMaxControllers - 1).
     /// If `overrideColor` is true, sets a custom RGB color from the host game.
