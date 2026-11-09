@@ -10,7 +10,7 @@
 
 ### 🌟 New in Moonlight MP
 
-- **Multi-Controller & Local Co-Op (MP)**: Connect up to 4 DualShock 4 controllers simultaneously for local multiplayer gaming. Secondary controllers are detected dynamically as users or guest accounts sign in (`sceUserServiceGetLoginUserIdList`). Automatically provisions virtual controllers on the host (`&remoteControllersBitmap=15&gcmap=15`).
+- **Multi-Controller & Local Co-Op (MP)**: Connect up to 4 DualShock 4 controllers simultaneously for local multiplayer gaming. Secondary controllers are detected dynamically as users or guest accounts sign in (`sceUserServiceGetLoginUserIdList`). Automatically provisions virtual controllers on the host based on connected local controllers and canonical `gcmap=0`.
 - **250 Hz High-Frequency Input & Motion Engine**: Runs input polling and motion sensor streaming on a dedicated background thread at a 4 ms cadence (250 Hz) for minimal latency and high-frequency gyroscope reports.
 - **Dual-Slot Touchpad Gestures & Smooth Scrolling**:
   - **1-Finger Drag**: Smooth mouse cursor movement with float sub-pixel accumulators.

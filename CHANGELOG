@@ -1,3 +1,11 @@
+V3.10 - 2026-11-09
+	Fix black screen with audio on PS5 ProsperoSunshine by rendering hardware-concealed error frames during Periodic Intra-Refresh (PIR) sweeps
+	Restore 30-frame drop timeout for WaitingForIdr before falling back to Running without dropping the frame
+	Require 5 consecutive decode errors before entering WaitingForIdr to prevent cyclic drop loops on transient reference errors
+	Preserve 256-byte stride alignment for HEVC maxFrameWidth to prevent SCE_VIDEODEC2_ERROR_OVERSIZE_DECODE errors
+	Fix new pairing connection failures ("Connecting" -> "failed") by querying connected local pads dynamically and reverting gcmap to canonical 0
+	Remove strict launch metadata rejections and provide canonical fallbacks for missing serverCodecModeSupport or appversion (restoring NVIDIA GFE, Vibeshine, and Sunshine compatibility)
+
 V3.00 - 2026-11-07
 	Implement 250 Hz high-frequency controller input and motion streaming on a dedicated background thread
 	Add multi-touch touchpad gestures: 1-finger sub-pixel cursor movement, 2-finger vertical and horizontal scrolling, and dual-finger clicks
