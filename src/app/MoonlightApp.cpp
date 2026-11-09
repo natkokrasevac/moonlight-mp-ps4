@@ -4790,8 +4790,7 @@ void MoonlightApp::handleActivateApplication(ml::HostId hostId,
         return;
     }
     if (host->serverId.empty() || host->ipv4Addresses.empty() ||
-        host->httpsPort == 0 || host->serverVersion.empty() ||
-        host->serverCodecModeSupport == 0) {
+        host->httpsPort == 0) {
         diagPrint("[app] launch: invalid host metadata (rejected)");
         return;
     }
@@ -4856,11 +4855,24 @@ void MoonlightApp::handleActivateApplication(ml::HostId hostId,
     // so the launch worker performs a fresh /launch instead of rejecting the
     // target as HostBusy (a different app appearing to still be running).
     target.currentGame = m_allowLaunchAfterQuit ? 0 : host->currentGame;
-    target.serverVersion = host->serverVersion;
-    target.serverCodecModeSupport = host->serverCodecModeSupport;
+    target.serverVersion = host->serverVersion.empty() ? "7.1.431.0" : host->serverVersion;
+    target.serverCodecModeSupport = host->serverCodecModeSupport != 0 ? host->serverCodecModeSupport : 0x00000001;
     target.clientUniqueId = m_pairingManager->clientUniqueId();
     target.clientCertPem = m_pairingManager->clientCertPem();
     target.clientKeyPem = m_pairingManager->clientKeyPem();
+
+    uint32_t controllerBitmap = 0;
+    if (m_input) {
+        for (int i = 0; i < 4; ++i) {
+            if (m_input->isControllerConnected(i)) {
+                controllerBitmap |= (1u << i);
+            }
+        }
+    }
+    if (controllerBitmap == 0) {
+        controllerBitmap = 1;
+    }
+    target.remoteControllersBitmap = controllerBitmap;
 
     // --- Apply the persistent stream settings ------------------------------
     // Resolution: 1080p → 1920×1080, 720p → 1280×720.
@@ -5421,6 +5433,12 @@ void MoonlightApp::startStreamSession(const ml::StreamSessionDescriptor& session
 
     // Copy the descriptor (the source is a const member of the launch update).
     ml::StreamSessionDescriptor copy = session;
+    if (copy.serverCodecModeSupport == 0) {
+        copy.serverCodecModeSupport = 0x00000001;
+    }
+    if (copy.serverInfoAppVersion.empty()) {
+        copy.serverInfoAppVersion = "7.1.431.0";
+    }
     ml::StreamSessionResult result =
         m_streamSessionManager->start(std::move(copy));
     if (!result.succeeded()) {

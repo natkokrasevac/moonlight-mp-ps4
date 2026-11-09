@@ -255,10 +255,10 @@ bool parseServerInfo(const std::vector<uint8_t>& body, ServerInfo& outInfo) {
         return false;
     }
 
-    // appversion is required by LiStartConnection() for protocol negotiation.
-    if (!extractXmlTag(body.data(), body.size(), "appversion", appVersion) ||
-        appVersion.empty()) {
-        return false;
+    // appversion is used by LiStartConnection() for protocol negotiation (fallback to default if missing).
+    extractXmlTag(body.data(), body.size(), "appversion", appVersion);
+    if (appVersion.empty()) {
+        appVersion = "7.1.431.0";
     }
     if (appVersion.size() > kMaxServerVersionLen) {
         return false;

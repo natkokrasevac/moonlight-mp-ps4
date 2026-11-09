@@ -138,6 +138,7 @@ struct ApplicationLaunchTarget {
     std::string clientCertPem;                ///< Client certificate (PEM) for mTLS.
     std::string clientKeyPem;                 ///< Client private key (PEM) for mTLS.
     uint32_t generation = 0;                  ///< Request generation for stale-result handling.
+    uint32_t remoteControllersBitmap = 1;     ///< Bitmask of connected local controllers (bit 0 = controller 1, etc.).
 
     // --- Stream settings (applied by MoonlightApp from SettingsManager) -----
     int width = 1920;                         ///< Requested stream width.

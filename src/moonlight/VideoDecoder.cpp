@@ -302,9 +302,11 @@ constexpr int32_t kDmemProt = ORBIS_KERNEL_PROT_CPU_RW | ORBIS_KERNEL_PROT_GPU_A
 /// at depth > 1.
 constexpr uint32_t kDecodePipelineDepth = 4;
 
-/// Number of consecutive P-frames discarded while in WaitingForIdr before
-/// re-requesting an IDR keyframe from the host (~1 second at 60 fps).
-constexpr uint32_t kMaxWaitingIdrDrops = 60;
+/// Maximum consecutive P-frames discarded while in WaitingForIdr before
+/// attempting decode anyway (prevents permanent black screen when streaming
+/// from hosts that do not support on-demand IDR generation, e.g. PS5 Avcap2
+/// or periodic intra-refresh).
+constexpr uint32_t kMaxWaitingIdrDrops = 30;
 
 } // namespace
 
@@ -478,6 +480,7 @@ struct VideoDecoder::Impl {
     /// code. Separate from firstDecodeResultLogged so a first-IDR failure is
     /// always captured even if a prior decode succeeded.
     std::atomic<bool> firstDecodeErrorLogged{false};
+    uint32_t consecutiveDecodeErrors = 0;
 
     // --- Retained AU input-buffer lifetime (Videodec2 frame-parallel) -------
     // Videodec2 frame-parallel input lifetime contract:
@@ -1031,10 +1034,9 @@ void vdFillDecoderConfig(Vd2DecoderConfigInfo* dc, Vd2ComputeQueue q,
         // produced. Aligning to 64 covers both (2160 -> 2176, 1080 -> 1088).
         //
         // The library additionally aligns maxFrameWidth to 256 and
-        // maxFrameHeight to 8 internally; aligning to 64 here is a superset
-        // (64 is a multiple of both 8 and 256's factor 8), so the configured
-        // values are never reduced below the coded size.
-        dc->maxFrameWidth = (w + 63) & ~63;   // HEVC: multiple of 64 (CTU).
+        // maxFrameHeight to 8 internally. maxFrameWidth is already aligned to
+        // 256 above (256 is also a multiple of 64 CTU). Align maxFrameHeight to
+        // 64 (CTU multiple) so the configured values cover the coded size.
         dc->maxFrameHeight = (h + 63) & ~63;  // HEVC: multiple of 64 (CTU).
         dc->maxDpbFrameCount = kHevcDpbFrameCount;
 
@@ -1212,23 +1214,31 @@ void* VideoDecoder::decoderWorker(void* arg) {
             if (unit.frameType != 1 /* FRAME_TYPE_IDR */) {
                 impl->waitingIdrDropCount++;
                 if (impl->waitingIdrDropCount >= kMaxWaitingIdrDrops) {
+                    // Host may not support on-demand IDRs (e.g. PS5 Avcap2 or periodic
+                    // intra-refresh). Fall back to attempting decode rather than permanently
+                    // staying black.
+                    vdDiagPrint("[video] WaitingForIdr threshold reached; attempting decode on incoming frames");
+                    impl->state = VideoDecoderState::Running;
                     impl->waitingIdrDropCount = 0;
                     LiRequestIdrFrame();
                     impl->idrRequests.fetch_add(1);
+                    // Do not discard: fall through and attempt decode on this frame.
+                } else {
+                    // Discard P-frame while waiting for IDR so unreferenced frames
+                    // do not produce garbled output or repeated decode-error loops.
+                    impl->encodedConsumed.fetch_add(1);
+                    continue;
                 }
-                // Discard P-frame while waiting for IDR so unreferenced frames
-                // do not produce garbled output or repeated decode-error loops.
-                impl->encodedConsumed.fetch_add(1);
-                continue;
-            }
-            // This is an IDR frame — submit it to recover.
-            impl->state = VideoDecoderState::Running;
-            impl->waitingIdrDropCount = 0;
-            {
-                VideoDecoderUpdate update;
-                update.type = VideoDecoderUpdateType::Recovered;
-                update.result = VideoDecoderResultCategory::Success;
-                impl->pushUpdate(update);
+            } else {
+                // This is an IDR frame — submit it to recover.
+                impl->state = VideoDecoderState::Running;
+                impl->waitingIdrDropCount = 0;
+                {
+                    VideoDecoderUpdate update;
+                    update.type = VideoDecoderUpdateType::Recovered;
+                    update.result = VideoDecoderResultCategory::Success;
+                    impl->pushUpdate(update);
+                }
             }
         }
 
@@ -1416,14 +1426,22 @@ void* VideoDecoder::decoderWorker(void* arg) {
             }
 
             // Map Videodec2 return codes to the decoder error policy.
-            // (Return codes are negative; treat any failure as recoverable
-            // by requesting an IDR, except fatal state which stops.)
-            impl->state = VideoDecoderState::WaitingForIdr;
-            impl->waitingIdrDropCount = 0;
-            LiRequestIdrFrame();
-            impl->idrRequests.fetch_add(1);
+            // For general decode errors (e.g. temporary missing reference before
+            // intra-refresh sweeps), accumulate consecutive errors instead of immediately
+            // entering a 30-frame drop loop on a single frame glitch.
+            impl->consecutiveDecodeErrors++;
+            if (impl->consecutiveDecodeErrors >= 5) {
+                impl->state = VideoDecoderState::WaitingForIdr;
+                impl->waitingIdrDropCount = 0;
+                impl->consecutiveDecodeErrors = 0;
+                LiRequestIdrFrame();
+                impl->idrRequests.fetch_add(1);
+            }
             continue;
         }
+
+        // Decode succeeded: clear consecutive error counter.
+        impl->consecutiveDecodeErrors = 0;
 
         // --- Track pipeline acceptance and resolve output buffer index -------
         if (frameBuffer.isAccepted) {
@@ -1462,9 +1480,11 @@ void* VideoDecoder::decoderWorker(void* arg) {
         impl->frameBuffers[outBufIndex].inDecoderPipeline = false;
 
         if (outputInfo.isErrorFrame) {
-            // The output frame is flagged as an error frame; return its slot.
-            impl->releaseFrameBuffer(outBufIndex);
-            continue;
+            // The output frame has error concealment applied. Do NOT discard it:
+            // in real-time streaming (especially with periodic intra-refresh hosts
+            // like PS5 Avcap2), presenting the frame allows the stream to display
+            // and visually reconstruct rather than staying permanently black.
+            impl->decodedFrameDrops.fetch_add(0);
         }
 
         // Ensure outBufIndex is marked leased for the DecodedVideoFrame.
@@ -1601,6 +1621,7 @@ VideoDecoderResult VideoDecoder::initialize() {
     m_impl->statsDecodeTotalUs = 0;
     m_impl->statsDecodeCount = 0;
     m_impl->waitingIdrDropCount = 0;
+    m_impl->consecutiveDecodeErrors = 0;
 
     // Clear retained AUs and reset the decode-call sequence.
     m_impl->retainedAus.clear();
@@ -1855,6 +1876,7 @@ VideoDecoderResult VideoDecoder::start(const VideoDecoderConfiguration& config) 
     m_impl->statsDecodeTotalUs = 0;
     m_impl->statsDecodeCount = 0;
     m_impl->waitingIdrDropCount = 0;
+    m_impl->consecutiveDecodeErrors = 0;
 
     // Clear retained AUs and reset the decode-call sequence.
     m_impl->retainedAus.clear();
