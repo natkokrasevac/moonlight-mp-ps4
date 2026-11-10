@@ -316,6 +316,17 @@ struct UiManager::Impl {
     bool        resetConfirmOpen = false;
     bool        resetConfirmYes = false;
 
+    // --- Auto-update dialog state -------------------------------------------
+    bool        updateAvailableOpen = false;
+    bool        updateProgressOpen = false;
+    bool        updateResultOpen = false;
+    bool        updateYesSelected = true;
+    std::string updateTitle;
+    std::string updateMessage;
+    std::string updateMessage2;
+    float       updateProgress = 0.0f;
+    std::string updateProgressText;
+
     // --- Add Host overlay state ---------------------------------------------
     enum class AddHostField : uint8_t {
         EntryType,
@@ -800,6 +811,65 @@ void UiManager::openResetConfirm() {
     m_impl->resetConfirmYes = false;   // Default to No.
 }
 
+bool UiManager::isUpdateModalOpen() const {
+    return m_impl && (m_impl->updateAvailableOpen ||
+                      m_impl->updateProgressOpen ||
+                      m_impl->updateResultOpen);
+}
+
+void UiManager::showUpdateAvailableModal(const std::string& latestVersion, uint64_t pkgSize) {
+    if (!m_impl) return;
+    m_impl->updateAvailableOpen = true;
+    m_impl->updateProgressOpen = false;
+    m_impl->updateResultOpen = false;
+    m_impl->updateYesSelected = true;
+    m_impl->updateTitle = UiStrings::kUpdateAvailableTitle;
+    char msg[256];
+    char msg2[256];
+    snprintf(msg, sizeof(msg), "A new version (%s) of Moonlight MP is available.", latestVersion.c_str());
+    if (pkgSize > 0) {
+        float mb = static_cast<float>(pkgSize) / (1024.0f * 1024.0f);
+        snprintf(msg2, sizeof(msg2), "Current: v%s  |  Download size: %.1f MB", UiStrings::kVersionNumber, mb);
+    } else {
+        snprintf(msg2, sizeof(msg2), "Current: v%s", UiStrings::kVersionNumber);
+    }
+    m_impl->updateMessage = msg;
+    m_impl->updateMessage2 = msg2;
+}
+
+void UiManager::showUpdateProgressModal(const std::string& pkgName, float progress, const std::string& progressText) {
+    if (!m_impl) return;
+    m_impl->updateAvailableOpen = false;
+    m_impl->updateProgressOpen = true;
+    m_impl->updateResultOpen = false;
+    m_impl->updateTitle = UiStrings::kUpdateDownloadingTitle;
+    m_impl->updateMessage = pkgName;
+    m_impl->updateProgress = progress;
+    m_impl->updateProgressText = progressText;
+}
+
+void UiManager::updateDownloadProgress(float progress, const std::string& progressText) {
+    if (!m_impl) return;
+    m_impl->updateProgress = progress;
+    m_impl->updateProgressText = progressText;
+}
+
+void UiManager::showUpdateResultModal(const std::string& title, const std::string& message) {
+    if (!m_impl) return;
+    m_impl->updateAvailableOpen = false;
+    m_impl->updateProgressOpen = false;
+    m_impl->updateResultOpen = true;
+    m_impl->updateTitle = title;
+    m_impl->updateMessage = message;
+}
+
+void UiManager::closeUpdateModal() {
+    if (!m_impl) return;
+    m_impl->updateAvailableOpen = false;
+    m_impl->updateProgressOpen = false;
+    m_impl->updateResultOpen = false;
+}
+
 void UiManager::setButtonAssignment(bool crossIsAccept) {
     if (m_impl) {
         m_impl->crossIsAccept = crossIsAccept;
@@ -1278,21 +1348,25 @@ bool UiManager::buildSettingsRenderState(SettingsRenderState& out) const {
     addRow("Show Quit App Dialog",
            m_impl->settingsView.showQuitAppDialog ? "On" : "Off",
            true, 7);
+    static const std::string kVerStr = std::string("v") + UiStrings::kVersionNumber;
+    addRow("Check for Updates",
+           kVerStr.c_str(),
+           true, 8);
     addRow("Speakers",
            m_impl->settingsView.muteHostSpeakers ? "Muted" : "Unmuted",
-           true, 8);
+           true, 9);
     addRow("Game Optimization",
            m_impl->settingsView.optimizeGameSettings ? "On" : "Off",
-           true, 9);
+           true, 10);
     char deadzoneStr[16];
     snprintf(deadzoneStr, sizeof(deadzoneStr), "%d%%", m_impl->settingsView.stickDeadzonePercent);
-    addRow("Stick Deadzone", deadzoneStr, true, 10);
+    addRow("Stick Deadzone", deadzoneStr, true, 11);
     addRow("Swap Face Buttons",
            m_impl->settingsView.swapFaceButtons ? "On" : "Off",
-           true, 11);
+           true, 12);
     addRow("Gyro Motion",
            m_impl->settingsView.gyroMotionEnabled ? "On" : "Off",
-           true, 12);
+           true, 13);
 
     out = std::move(state);
     return true;
@@ -1301,6 +1375,40 @@ bool UiManager::buildSettingsRenderState(SettingsRenderState& out) const {
 bool UiManager::buildModalRenderState(ModalRenderState& out) const {
     if (!m_impl || !m_impl->initialized) {
         return false;
+    }
+
+    if (m_impl->updateAvailableOpen) {
+        ModalRenderState state;
+        state.kind = ModalKind::UpdateAvailable;
+        state.title = m_impl->updateTitle;
+        state.message = m_impl->updateMessage;
+        state.message2 = m_impl->updateMessage2;
+        state.yesSelected = m_impl->updateYesSelected;
+        state.crossIsAccept = m_impl->crossIsAccept;
+        out = std::move(state);
+        return true;
+    }
+
+    if (m_impl->updateProgressOpen) {
+        ModalRenderState state;
+        state.kind = ModalKind::UpdateProgress;
+        state.title = m_impl->updateTitle;
+        state.message = m_impl->updateMessage;
+        state.progress = m_impl->updateProgress;
+        state.progressText = m_impl->updateProgressText;
+        state.crossIsAccept = m_impl->crossIsAccept;
+        out = std::move(state);
+        return true;
+    }
+
+    if (m_impl->updateResultOpen) {
+        ModalRenderState state;
+        state.kind = ModalKind::UpdateResult;
+        state.title = m_impl->updateTitle;
+        state.message = m_impl->updateMessage;
+        state.crossIsAccept = m_impl->crossIsAccept;
+        out = std::move(state);
+        return true;
     }
 
     if (m_impl->deleteConfirmOpen) {
@@ -1761,6 +1869,58 @@ void UiManager::processInput(const UiInput& input) {
         return;
     }
 
+    // --- Auto-update Available modal: exclusive focus -----------------------
+    if (m_impl->updateAvailableOpen) {
+        const bool prevYes = m_impl->updateYesSelected;
+        if (input.leftPressed) {
+            m_impl->updateYesSelected = false; // Later
+        }
+        if (input.rightPressed) {
+            m_impl->updateYesSelected = true;  // Update
+        }
+        if (m_impl->updateYesSelected != prevYes) {
+            m_impl->pendingSoundIntent = UiSoundIntent::Cursor;
+        }
+
+        if (input.acceptPressed) {
+            if (m_impl->updateYesSelected) {
+                m_impl->pendingIntent = UiIntent(UiIntentType::RequestUpdateNow);
+            }
+            m_impl->updateAvailableOpen = false;
+            m_impl->pendingSoundIntent = UiSoundIntent::Accept;
+            return;
+        }
+
+        if (input.backPressed) {
+            m_impl->updateAvailableOpen = false;
+            m_impl->pendingSoundIntent = UiSoundIntent::Back;
+            return;
+        }
+
+        return;
+    }
+
+    // --- Auto-update Progress modal: exclusive focus ------------------------
+    if (m_impl->updateProgressOpen) {
+        if (input.backPressed || input.acceptPressed) {
+            m_impl->pendingIntent = UiIntent(UiIntentType::CancelUpdate);
+            m_impl->updateProgressOpen = false;
+            m_impl->pendingSoundIntent = UiSoundIntent::Back;
+            return;
+        }
+        return;
+    }
+
+    // --- Auto-update Result modal: exclusive focus --------------------------
+    if (m_impl->updateResultOpen) {
+        if (input.acceptPressed || input.backPressed) {
+            m_impl->updateResultOpen = false;
+            m_impl->pendingSoundIntent = UiSoundIntent::Accept;
+            return;
+        }
+        return;
+    }
+
     // --- Delete-host confirmation dialog: exclusive focus -------------------
     if (m_impl->deleteConfirmOpen) {
         const bool prevYes = m_impl->deleteConfirmYes;
@@ -1839,7 +1999,7 @@ void UiManager::processInput(const UiInput& input) {
         if (input.upPressed && m_impl->settingsSelectedRow > 0) {
             m_impl->settingsSelectedRow--;
         }
-        if (input.downPressed && m_impl->settingsSelectedRow < 12) {
+        if (input.downPressed && m_impl->settingsSelectedRow < 13) {
             m_impl->settingsSelectedRow++;
         }
         if (m_impl->settingsSelectedRow != prevRow) {
@@ -1856,6 +2016,15 @@ void UiManager::processInput(const UiInput& input) {
         }
 
         if (input.acceptPressed) {
+            if (m_impl->settingsSelectedRow == 8) {
+                // Check for updates
+                UiIntent intent(UiIntentType::CheckForUpdates);
+                intent.settings = m_impl->settingsView;
+                m_impl->pendingIntent = intent;
+                m_impl->settingsOverlayOpen = false;
+                m_impl->pendingSoundIntent = UiSoundIntent::Accept;
+                return;
+            }
             // Accept always steps forward (same as Right).
             m_impl->cycleSettingsRow(m_impl->settingsSelectedRow, +1);
             m_impl->pendingSoundIntent = UiSoundIntent::Accept;
@@ -2326,12 +2495,15 @@ void UiManager::Impl::cycleSettingsRow(int rowIndex, int direction) {
         settingsView.showQuitAppDialog = !settingsView.showQuitAppDialog;
         break;
     case 8:
-        settingsView.muteHostSpeakers = !settingsView.muteHostSpeakers;
+        // Row 8 is "Check for Updates" (action handled on accept)
         break;
     case 9:
+        settingsView.muteHostSpeakers = !settingsView.muteHostSpeakers;
+        break;
+    case 10:
         settingsView.optimizeGameSettings = !settingsView.optimizeGameSettings;
         break;
-    case 10: {
+    case 11: {
         static const int kDeadzones[] = { 0, 5, 8, 10, 15, 20 };
         const int numDeadzones = static_cast<int>(sizeof(kDeadzones) / sizeof(kDeadzones[0]));
         int currentIndex = 2; // Default 8%
@@ -2345,10 +2517,10 @@ void UiManager::Impl::cycleSettingsRow(int rowIndex, int direction) {
         settingsView.stickDeadzonePercent = kDeadzones[currentIndex];
         break;
     }
-    case 11:
+    case 12:
         settingsView.swapFaceButtons = !settingsView.swapFaceButtons;
         break;
-    case 12:
+    case 13:
         settingsView.gyroMotionEnabled = !settingsView.gyroMotionEnabled;
         break;
     default:

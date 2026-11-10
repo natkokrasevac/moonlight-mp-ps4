@@ -197,6 +197,20 @@ constexpr const char* kStatFramePresent = "Frame Presentation";
 /// Time per Frame (statistics row label). Used by the StreamStatistics overlay.
 constexpr const char* kStatFrameTotal = "Time per Frame";
 
+// --- Auto-update strings ---------------------------------------------------
+constexpr const char* kUpdateAvailableTitle = "Update Available";
+constexpr const char* kUpdateLater = "Later";
+constexpr const char* kUpdateNow = "Update";
+constexpr const char* kUpdateDownloadingTitle = "Downloading Update";
+constexpr const char* kUpdateDownloadedTitle = "Update Ready";
+constexpr const char* kUpdateDownloadedAutoMsg = "Update downloaded and installation queued!\nYou can close Moonlight to complete install.";
+constexpr const char* kUpdateDownloadedManualMsg = "Update downloaded to /data/pkg/.\nPlease install via GoldHEN Package Installer.";
+constexpr const char* kUpdateFailedTitle = "Update Failed";
+constexpr const char* kUpdateFailedMsg = "Could not check or download update.\nPlease check your network connection.";
+constexpr const char* kUpdateUpToDateTitle = "Up to Date";
+constexpr const char* kUpdateUpToDateMsg = "You are running the latest version of Moonlight MP.";
+constexpr const char* kCheckForUpdates = "Check for Updates";
+
 } // namespace UiStrings
 
 } // namespace ui

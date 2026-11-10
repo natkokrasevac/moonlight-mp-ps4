@@ -97,30 +97,29 @@ ps4::Rect SettingsRenderer::panelBounds() const {
 
 float SettingsRenderer::rowTop(int rowIndex) const {
     // Rows 0-5 are under the STREAM header (after the title block).
-    // Rows 6-7 (Presentation Style, Show Quit App Dialog) are under the CLIENT
-    // header.
-    // Rows 8-9 (Speakers, Game Optimization) are under the HOST header.
-    // Rows 10-12 (Stick Deadzone, Swap Face Buttons, Gyro Motion) are under the GAMEPAD header.
+    // Rows 6-8 (Presentation Style, Show Quit App Dialog, Check for Updates) are under the CLIENT header.
+    // Rows 9-10 (Speakers, Game Optimization) are under the HOST header.
+    // Rows 11-13 (Stick Deadzone, Swap Face Buttons, Gyro Motion) are under the GAMEPAD header.
     const float baseY = panelY() + margin() + titleBlockHeight() + sectionHeaderHeight();
     if (rowIndex <= 5) {
         return baseY + rowIndex * rowHeight();
     }
-    // Rows 6-7: after rows 0-5, a separator, and the CLIENT header.
+    // Rows 6-8: after rows 0-5, a separator, and the CLIENT header.
     const float clientRowTop =
         baseY + 6 * rowHeight() + separatorHeight() + sectionHeaderHeight();
-    if (rowIndex <= 7) {
+    if (rowIndex <= 8) {
         return clientRowTop + (rowIndex - 6) * rowHeight();
     }
-    // Rows 8-9: after row 7, a separator, and the HOST header.
+    // Rows 9-10: after row 8, a separator, and the HOST header.
     const float hostRowTop =
-        clientRowTop + 2 * rowHeight() + separatorHeight() + sectionHeaderHeight();
-    if (rowIndex <= 9) {
-        return hostRowTop + (rowIndex - 8) * rowHeight();
+        clientRowTop + 3 * rowHeight() + separatorHeight() + sectionHeaderHeight();
+    if (rowIndex <= 10) {
+        return hostRowTop + (rowIndex - 9) * rowHeight();
     }
-    // Rows 10-12: after row 9, a separator, and the GAMEPAD header.
+    // Rows 11-13: after row 10, a separator, and the GAMEPAD header.
     const float gamepadRowTop =
         hostRowTop + 2 * rowHeight() + separatorHeight() + sectionHeaderHeight();
-    return gamepadRowTop + (rowIndex - 10) * rowHeight();
+    return gamepadRowTop + (rowIndex - 11) * rowHeight();
 }
 
 ps4::Rect SettingsRenderer::rowBounds(int rowIndex) const {
@@ -190,32 +189,32 @@ void SettingsRenderer::renderFull(const SettingsRenderState& state,
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kClientSection,
                   contentX, clientHeaderY + baselineY, 200, 200, 210);
 
-    // Rows 6-7 (Presentation Style, Show Quit App Dialog) under CLIENT.
-    for (int i = 6; i < 8 && i < static_cast<int>(state.rows.size()); ++i) {
+    // Rows 6-8 (Presentation Style, Show Quit App Dialog, Check for Updates) under CLIENT.
+    for (int i = 6; i < 9 && i < static_cast<int>(state.rows.size()); ++i) {
         drawRow(state.rows[i], i, rowTop(i), comp);
     }
 
     // "HOST" section header.
-    const float hostHeaderY = rowTop(8) - sectionHeaderHeight();
+    const float hostHeaderY = rowTop(9) - sectionHeaderHeight();
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
                                  baselineY, lineHeight);
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kHostSection,
                   contentX, hostHeaderY + baselineY, 200, 200, 210);
 
-    // Rows 8-9 (Speakers, Game Optimization) under HOST.
-    for (int i = 8; i < 10 && i < static_cast<int>(state.rows.size()); ++i) {
+    // Rows 9-10 (Speakers, Game Optimization) under HOST.
+    for (int i = 9; i < 11 && i < static_cast<int>(state.rows.size()); ++i) {
         drawRow(state.rows[i], i, rowTop(i), comp);
     }
 
     // "GAMEPAD" section header.
-    const float gamepadHeaderY = rowTop(10) - sectionHeaderHeight();
+    const float gamepadHeaderY = rowTop(11) - sectionHeaderHeight();
     m_fonts->getHorizontalLayout(ps4::FontRasterizer::FontFace::Bold,
                                  baselineY, lineHeight);
     comp.drawText(ps4::FontRasterizer::FontFace::Bold, UiStrings::kGamepadSection,
                   contentX, gamepadHeaderY + baselineY, 200, 200, 210);
 
-    // Rows 10-12 (Stick Deadzone, Swap Face Buttons, Gyro Motion) under GAMEPAD.
-    for (int i = 10; i < 13 && i < static_cast<int>(state.rows.size()); ++i) {
+    // Rows 11-13 (Stick Deadzone, Swap Face Buttons, Gyro Motion) under GAMEPAD.
+    for (int i = 11; i < 14 && i < static_cast<int>(state.rows.size()); ++i) {
         drawRow(state.rows[i], i, rowTop(i), comp);
     }
 
@@ -260,12 +259,12 @@ void SettingsRenderer::drawSeparators(ps4::UiCompositor& comp) {
     // Separator between CLIENT and HOST sections. Placed above the HOST
     // heading, after the spacing gap that follows the CLIENT rows, with the
     // same gap to the heading as the STREAM heading has.
-    const float hostSepY = rowTop(8) - sectionHeaderHeight() - 8.0f;
+    const float hostSepY = rowTop(9) - sectionHeaderHeight() - 8.0f;
     comp.fillRect(px, static_cast<int>(hostSepY), pw, 2,
                   UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
 
     // Separator between HOST and GAMEPAD sections.
-    const float gamepadSepY = rowTop(10) - sectionHeaderHeight() - 8.0f;
+    const float gamepadSepY = rowTop(11) - sectionHeaderHeight() - 8.0f;
     comp.fillRect(px, static_cast<int>(gamepadSepY), pw, 2,
                   UiTheme::kSeparatorR, UiTheme::kSeparatorG, UiTheme::kSeparatorB, 255);
 }

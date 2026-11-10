@@ -210,7 +210,10 @@ struct SettingsRenderState {
 enum class ModalKind : uint8_t {
     DeleteHost,           ///< Delete Host confirmation (No/Yes choices).
     QuitApp,              ///< Quit-app confirmation (No/Yes choices).
-    ResetMoonlight        ///< Reset Moonlight confirmation (No/Yes choices).
+    ResetMoonlight,       ///< Reset Moonlight confirmation (No/Yes choices).
+    UpdateAvailable,      ///< New version available (Later / Update choices).
+    UpdateProgress,       ///< PKG download in progress (progress bar).
+    UpdateResult          ///< Update outcome notification (OK choice).
 };
 
 /// Render snapshot for a CPU confirmation modal.
@@ -222,6 +225,8 @@ struct ModalRenderState {
     std::string hostName;    ///< Host display name (DeleteHost only).
     bool yesSelected = false; ///< Selected option (No/Yes modals only; false = No).
     bool crossIsAccept = true; ///< System Enter Button Assignment.
+    float progress = 0.0f;   ///< Progress bar fraction (0.0f..1.0f, for UpdateProgress).
+    std::string progressText; ///< Progress summary (e.g. "4.8 MB / 9.5 MB (50%)").
 };
 
 // ---------------------------------------------------------------------------
@@ -291,7 +296,10 @@ enum class UiIntentType : uint8_t {
     RequestDeleteHost,
     RequestAddHost,
     CancelAddHost,
-    RequestResetMoonlight
+    RequestResetMoonlight,
+    RequestUpdateNow,
+    CancelUpdate,
+    CheckForUpdates
 };
 
 /// A user intent emitted by UiManager and consumed by MoonlightApp.
@@ -529,6 +537,24 @@ public:
 
     /// Open the Reset Moonlight confirmation dialog (defaults to No).
     void openResetConfirm();
+
+    /// Returns true while any auto-update modal is open.
+    bool isUpdateModalOpen() const;
+
+    /// Open the Update Available modal.
+    void showUpdateAvailableModal(const std::string& latestVersion, uint64_t pkgSize);
+
+    /// Open the Update Progress modal with initial progress.
+    void showUpdateProgressModal(const std::string& pkgName, float progress, const std::string& progressText);
+
+    /// Update active progress modal values during download.
+    void updateDownloadProgress(float progress, const std::string& progressText);
+
+    /// Open the Update Result modal (e.g. download complete or failure).
+    void showUpdateResultModal(const std::string& title, const std::string& message);
+
+    /// Close any open update modal.
+    void closeUpdateModal();
 
     /// Set the system's Enter Button Assignment.
     void setButtonAssignment(bool crossIsAccept);

@@ -115,10 +115,10 @@ private:
     float separatorHeight() const { return 28.0f; }
 
     /// The Y position of the top of the row at `rowIndex`. Rows 0-5 are under
-    /// the STREAM header; rows 6-7 (Presentation Style, Show Quit App Dialog)
-    /// are under the CLIENT header; rows 8-9 (Speakers, Game Optimization) are
-    /// under the HOST header; rows 10-12 (Stick Deadzone, Swap Face Buttons,
-    /// Gyro Motion) are under the GAMEPAD header.
+    /// the STREAM header; rows 6-8 (Presentation Style, Show Quit App Dialog,
+    /// Check for Updates) are under the CLIENT header; rows 9-10 (Speakers,
+    /// Game Optimization) are under the HOST header; rows 11-13 (Stick Deadzone,
+    /// Swap Face Buttons, Gyro Motion) are under the GAMEPAD header.
     float rowTop(int rowIndex) const;
 
     /// Draw a single row into `comp` at the given Y position.

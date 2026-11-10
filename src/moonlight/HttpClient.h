@@ -225,6 +225,13 @@ public:
         m_abortCtx.store(nullptr, std::memory_order_release);
     }
 
+    /// Reset the token to non-cancelled state for reuse.
+    void reset() {
+        m_cancelled.store(false, std::memory_order_release);
+        m_abortFn.store(nullptr, std::memory_order_release);
+        m_abortCtx.store(nullptr, std::memory_order_release);
+    }
+
 private:
     using AbortFn = void (*)(void*);
     std::atomic<bool> m_cancelled{false};
@@ -286,6 +293,16 @@ public:
     /// Returns true once initialize() has succeeded and before shutdown().
     bool isInitialized() const;
 
+    /// Callback for tracking file download progress: (downloadedBytes, totalBytes, userCtx).
+    /// If totalBytes is unknown from headers, it is passed as 0.
+    using DownloadProgressCallback = void (*)(uint64_t downloadedBytes,
+                                              uint64_t totalBytes,
+                                              void* userCtx);
+
+    /// Utility helper to parse a standard HTTP/HTTPS URL into an HttpRequest struct.
+    /// Returns true on success, false if the URL syntax is invalid.
+    static bool parseUrl(const std::string& url, HttpRequest& outRequest);
+
     /// Execute one HTTP/HTTPS request synchronously.
     ///
     /// `request` describes the request. `response` receives the result.
@@ -297,6 +314,19 @@ public:
     HttpResult perform(const HttpRequest& request,
                        HttpResponse& response,
                        HttpCancellationToken* cancellation = nullptr);
+
+    /// Execute an HTTP/HTTPS GET request and stream the received body directly to a
+    /// destination file on disk. This avoids buffering large payloads (such as
+    /// packages) in memory.
+    ///
+    /// Writes to `<destinationPath>.tmp` and renames to `destinationPath` upon
+    /// successful completion. Cleans up partial files on cancellation or failure.
+    HttpResult performDownload(const HttpRequest& request,
+                               const std::string& destinationPath,
+                               HttpResponse& response,
+                               DownloadProgressCallback progressFn = nullptr,
+                               void* userCtx = nullptr,
+                               HttpCancellationToken* cancellation = nullptr);
 
 private:
     struct Impl;

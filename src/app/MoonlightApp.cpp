@@ -65,6 +65,7 @@
 #include "moonlight/AudioDecodeOutput.h"
 #include "moonlight/ControllerInputStreaming.h"
 #include "moonlight/SettingsManager.h"
+#include "moonlight/UpdateManager.h"
 
 // --- UI manager and renderers ------------------------------------------------
 #include "ui/UiManager.h"
@@ -81,6 +82,7 @@
 #include "ui/StreamExitHintRenderer.h"
 #include "ui/StreamStatisticsRenderer.h"
 #include "ui/MouseEmulationOverlayRenderer.h"
+#include "ui/UiStrings.h"
 
 // --- OpenOrbis SDK headers (private to this translation unit) -----------------------
 #include <orbis/libkernel.h>   // sceKernelGetProcessTime
@@ -210,6 +212,7 @@ MoonlightApp::MoonlightApp()
     , m_audioDecodeOutput(new ml::AudioDecodeOutput())
     , m_controllerInputStreaming(new ml::ControllerInputStreaming())
     , m_settingsManager(new ml::SettingsManager())
+    , m_updateManager(new ml::UpdateManager())
     , m_pairingStore(new ml::PairingStore())
     , m_ui(new ui::UiManager())
     , m_uiSound(new ps4::UiSoundManager())
@@ -900,6 +903,16 @@ AppResult MoonlightApp::initialize() {
         diagPrint("[app] MouseEmulationOverlayRenderer initialized (dormant)");
     }
 
+    // 15.5. Initialize the UpdateManager and trigger an asynchronous check for updates.
+    if (m_updateManager) {
+        if (m_updateManager->initialize()) {
+            diagPrint("[app] UpdateManager initialized; starting background check");
+            m_updateManager->checkForUpdatesAsync();
+        } else {
+            diagPrint("[app] UpdateManager initialize failed (non-fatal)");
+        }
+    }
+
     // 16. Clear the compositor to the fallback background.
     m_uiCompositor->clear(kFallbackBgR, kFallbackBgG, kFallbackBgB, 255);
 
@@ -1183,6 +1196,10 @@ void MoonlightApp::shutdown() {
     // saved when the Settings overlay closes, so no save is needed here.
     if (m_settingsManager) {
         m_settingsManager->shutdown();
+    }
+
+    if (m_updateManager) {
+        m_updateManager->shutdown();
     }
 
     // Then UI/graphics teardown.
@@ -1879,6 +1896,11 @@ void MoonlightApp::update(float deltaTime) {
     //     while a stream is active and statistics are enabled. Reads the
     //     subsystem counters and pushes the computed snapshot to UiManager.
     updateStreamStatistics();
+
+    // 6c. Process auto-update manager status changes and update UI modals.
+    if (!m_streamActive) {
+        updateAutoUpdate();
+    }
 
     // 7. Consume UI intents emitted by UiManager ONLY when not streaming.
     //    While streaming, UiManager intents are not polled or executed, so no
@@ -3575,6 +3597,32 @@ void MoonlightApp::handleUiIntent(const ui::UiIntent& intent) {
     case ui::UiIntentType::CancelAddHost:
         diagPrint("[app] intent: CancelAddHost");
         handleCancelAddHost();
+        break;
+    case ui::UiIntentType::RequestUpdateNow:
+        diagPrint("[app] intent: RequestUpdateNow");
+        if (m_updateManager) {
+            ml::UpdateInfo info = m_updateManager->updateInfo();
+            m_updateManager->startDownloadAsync();
+            if (m_ui) {
+                m_ui->showUpdateProgressModal(info.pkgName, 0.0f, "Starting download...");
+            }
+        }
+        break;
+    case ui::UiIntentType::CancelUpdate:
+        diagPrint("[app] intent: CancelUpdate");
+        if (m_updateManager) {
+            m_updateManager->cancel();
+        }
+        if (m_ui) {
+            m_ui->closeUpdateModal();
+        }
+        break;
+    case ui::UiIntentType::CheckForUpdates:
+        diagPrint("[app] intent: CheckForUpdates");
+        m_manualUpdateCheck = true;
+        if (m_updateManager) {
+            m_updateManager->checkForUpdatesAsync();
+        }
         break;
     default:
         break;
@@ -6106,6 +6154,91 @@ void MoonlightApp::closeSettingsOverlay(const ui::SettingsViewState& edited) {
     m_settingsManager->save();
 
     m_settingsOverlayOpen = false;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-update flow
+// ---------------------------------------------------------------------------
+
+void MoonlightApp::updateAutoUpdate() {
+    if (!m_updateManager || !m_ui) {
+        return;
+    }
+
+    const ml::UpdateStatus st = m_updateManager->status();
+    switch (st) {
+    case ml::UpdateStatus::UpdateAvailable: {
+        if (!m_updatePrompted || m_manualUpdateCheck) {
+            if (m_ui->currentScreen() == ui::UiScreen::HostList &&
+                !m_ui->isDeleteConfirmOpen() &&
+                !m_ui->isResetConfirmOpen() &&
+                !m_ui->isSettingsOpen() &&
+                !m_ui->isHelpOpen()) {
+                ml::UpdateInfo info = m_updateManager->updateInfo();
+                m_ui->showUpdateAvailableModal(info.tagName, info.pkgSize);
+                m_updatePrompted = true;
+                m_manualUpdateCheck = false;
+            }
+        }
+        break;
+    }
+    case ml::UpdateStatus::UpToDate: {
+        if (m_manualUpdateCheck) {
+            m_ui->showUpdateResultModal(ui::UiStrings::kUpdateUpToDateTitle,
+                                        ui::UiStrings::kUpdateUpToDateMsg);
+            m_manualUpdateCheck = false;
+        }
+        break;
+    }
+    case ml::UpdateStatus::CheckFailed: {
+        if (m_manualUpdateCheck) {
+            m_ui->showUpdateResultModal(ui::UiStrings::kUpdateFailedTitle,
+                                        ui::UiStrings::kUpdateFailedMsg);
+            m_manualUpdateCheck = false;
+        }
+        break;
+    }
+    case ml::UpdateStatus::Downloading: {
+        uint64_t downloaded = 0, total = 0;
+        float fraction = 0.0f;
+        m_updateManager->getDownloadProgress(downloaded, total, fraction);
+        char pText[128];
+        float dlMb = static_cast<float>(downloaded) / (1024.0f * 1024.0f);
+        float totMb = static_cast<float>(total) / (1024.0f * 1024.0f);
+        int pct = static_cast<int>(fraction * 100.0f);
+        if (totMb > 0.0f) {
+            snprintf(pText, sizeof(pText), "%.1f MB / %.1f MB (%d%%)", dlMb, totMb, pct);
+        } else {
+            snprintf(pText, sizeof(pText), "%.1f MB downloaded", dlMb);
+        }
+        m_ui->updateDownloadProgress(fraction, pText);
+        break;
+    }
+    case ml::UpdateStatus::InstallStarted: {
+        m_ui->showUpdateResultModal(ui::UiStrings::kUpdateDownloadedTitle,
+                                    ui::UiStrings::kUpdateDownloadedAutoMsg);
+        m_updateManager->reset();
+        break;
+    }
+    case ml::UpdateStatus::Downloaded: {
+        m_ui->showUpdateResultModal(ui::UiStrings::kUpdateDownloadedTitle,
+                                    ui::UiStrings::kUpdateDownloadedManualMsg);
+        m_updateManager->reset();
+        break;
+    }
+    case ml::UpdateStatus::DownloadFailed: {
+        m_ui->showUpdateResultModal(ui::UiStrings::kUpdateFailedTitle,
+                                    ui::UiStrings::kUpdateFailedMsg);
+        m_updateManager->reset();
+        break;
+    }
+    case ml::UpdateStatus::Cancelled: {
+        m_updateManager->reset();
+        break;
+    }
+    default:
+        break;
+    }
 }
 
 // ---------------------------------------------------------------------------

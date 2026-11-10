@@ -134,6 +134,7 @@ class VideoDecoder;
 class AudioDecodeOutput;
 class ControllerInputStreaming;
 class SettingsManager;
+class UpdateManager;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +412,12 @@ private:
     /// initialization; supplies resolution/frame-rate/host-speaker settings
     /// to the launch/resume target construction.
     std::unique_ptr<ml::SettingsManager> m_settingsManager;
+
+    /// GitHub Releases auto-update manager. Owned by MoonlightApp.
+    /// Checks for releases asynchronously and streams PKG updates to /data/pkg/.
+    std::unique_ptr<ml::UpdateManager> m_updateManager;
+    bool m_updatePrompted = false;
+    bool m_manualUpdateCheck = false;
 
     /// Persistent client identity & trusted-host store. Owned by MoonlightApp.
     /// Initialized before network-dependent managers (it has no network
@@ -1047,6 +1054,9 @@ private:
     /// Close the Settings overlay: commit the edited values from UiManager to
     /// SettingsManager and persist them to disk.
     void closeSettingsOverlay(const ui::SettingsViewState& edited);
+
+    /// Poll and process auto-update manager status changes and update UI modals.
+    void updateAutoUpdate();
 
     /// Request an authenticated serverinfo refresh for the current App List
     /// host without the per-request diagnostic log (used by the polling

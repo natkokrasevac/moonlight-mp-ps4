@@ -125,6 +125,30 @@ private:
     void drawResetMoonlightChoices(const ModalRenderState& state,
                                    ps4::UiCompositor& comp);
 
+    /// Draw the Update Available modal content into `comp`.
+    void drawUpdateAvailableContent(const ModalRenderState& state,
+                                    ps4::UiCompositor& comp);
+
+    /// Draw the Update Available Later/Update choice buttons into `comp`.
+    void drawUpdateAvailableChoices(const ModalRenderState& state,
+                                    ps4::UiCompositor& comp);
+
+    /// Draw the Update Progress modal content into `comp`.
+    void drawUpdateProgressContent(const ModalRenderState& state,
+                                   ps4::UiCompositor& comp);
+
+    /// Draw the Update Progress Cancel choice button into `comp`.
+    void drawUpdateProgressChoices(const ModalRenderState& state,
+                                   ps4::UiCompositor& comp);
+
+    /// Draw the Update Result modal content into `comp`.
+    void drawUpdateResultContent(const ModalRenderState& state,
+                                 ps4::UiCompositor& comp);
+
+    /// Draw the Update Result OK choice button into `comp`.
+    void drawUpdateResultChoices(const ModalRenderState& state,
+                                 ps4::UiCompositor& comp);
+
     // --- State --------------------------------------------------------------
     ps4::FontRasterizer* m_fonts = nullptr;
     bool m_initialized = false;

@@ -48,9 +48,11 @@
 #include <orbis/Net.h>              // sceNetPoolCreate, sceNetPoolDestroy
 
 #include <cstdio>                // printf, fflush, snprintf
+#include <cstdlib>               // atoi
 #include <cstring>               // memset
 #include <string>
 #include <vector>
+#include <sys/stat.h>            // mkdir
 
 // ---------------------------------------------------------------------------
 // Diagnostics helper (minimal; consistent with other platform modules)
@@ -581,6 +583,305 @@ cleanup:
     // Delete the per-request template last (after connection/request).
     if (tmplId >= 0) {
         sceHttpDeleteTemplate(tmplId);
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// URL parser
+// ---------------------------------------------------------------------------
+
+bool HttpClient::parseUrl(const std::string& url, HttpRequest& outRequest) {
+    if (url.empty()) {
+        return false;
+    }
+
+    std::string scheme;
+    size_t schemeEnd = url.find("://");
+    if (schemeEnd == std::string::npos) {
+        return false;
+    }
+    scheme = url.substr(0, schemeEnd);
+    bool useTls = (scheme == "https");
+    if (!useTls && scheme != "http") {
+        return false;
+    }
+    uint16_t defaultPort = useTls ? 443 : 80;
+
+    size_t hostStart = schemeEnd + 3;
+    size_t pathStart = url.find('/', hostStart);
+    std::string hostAndPort = (pathStart == std::string::npos) ?
+        url.substr(hostStart) : url.substr(hostStart, pathStart - hostStart);
+    std::string path = (pathStart == std::string::npos) ? "/" : url.substr(pathStart);
+
+    std::string host = hostAndPort;
+    uint16_t port = defaultPort;
+    size_t colonPos = hostAndPort.find(':');
+    if (colonPos != std::string::npos) {
+        host = hostAndPort.substr(0, colonPos);
+        std::string portStr = hostAndPort.substr(colonPos + 1);
+        int p = std::atoi(portStr.c_str());
+        if (p > 0 && p <= 65535) {
+            port = static_cast<uint16_t>(p);
+        }
+    }
+
+    if (host.empty()) {
+        return false;
+    }
+
+    outRequest = HttpRequest();
+    outRequest.method = HttpMethod::Get;
+    outRequest.address = host;
+    outRequest.port = port;
+    outRequest.hostHeader = host;
+    outRequest.target = path;
+    outRequest.useTls = useTls;
+    outRequest.tls.trustMode = HttpTlsTrustMode::Unverified;
+    outRequest.connectTimeoutMs = 10000;
+    outRequest.ioTimeoutMs = 15000;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Streamed file download
+// ---------------------------------------------------------------------------
+
+HttpResult HttpClient::performDownload(const HttpRequest& request,
+                                       const std::string& destinationPath,
+                                       HttpResponse& response,
+                                       DownloadProgressCallback progressFn,
+                                       void* userCtx,
+                                       HttpCancellationToken* cancellation) {
+    if (!m_impl || !m_impl->initialized) {
+        return HttpResult(HttpResultCategory::InvalidState);
+    }
+
+    if (destinationPath.empty()) {
+        httpDiagPrint("[http] performDownload: empty destination path");
+        return HttpResult(HttpResultCategory::InvalidRequest);
+    }
+    if (request.address.empty() || request.port == 0) {
+        httpDiagPrint("[http] invalid request: address/port");
+        return HttpResult(HttpResultCategory::InvalidRequest);
+    }
+    if (request.target.empty() || request.target.size() > kMaxTargetLen) {
+        httpDiagPrint("[http] invalid request: target");
+        return HttpResult(HttpResultCategory::InvalidRequest);
+    }
+
+    if (cancellation != nullptr && cancellation->cancelled()) {
+        return HttpResult(HttpResultCategory::Cancelled);
+    }
+
+    response = HttpResponse();
+
+    int reqId = -1;
+    int connId = -1;
+    int tmplId = -1;
+    int rc = 0;
+    int32_t statusCode = 0;
+    int contentLengthType = 0;
+    uint64_t contentLength = 0;
+    FILE* outFile = nullptr;
+    std::string tmpPath = destinationPath + ".tmp";
+
+    HttpResult result;
+
+    tmplId = sceHttpCreateTemplate(m_impl->httpCtxId, kUserAgent,
+                                   ORBIS_HTTP_VERSION_1_1, 1);
+    if (tmplId < 0) {
+        httpDiagPrint("[http] sceHttpCreateTemplate failed");
+        return HttpResult(HttpResultCategory::HttpInitializationFailure,
+                          static_cast<uint32_t>(tmplId));
+    }
+
+    if (request.useTls) {
+        rc = sceHttpsSetSslCallback(tmplId, sslVerifyCallback, nullptr);
+        if (rc < 0) {
+            httpDiagPrint("[http] sceHttpsSetSslCallback(template) failed");
+            sceHttpDeleteTemplate(tmplId);
+            return HttpResult(HttpResultCategory::SdkFailure,
+                              static_cast<uint32_t>(rc));
+        }
+    }
+
+    const char* scheme = request.useTls ? "https" : "http";
+    char urlBuf[kMaxTargetLen + 64];
+    snprintf(urlBuf, sizeof(urlBuf), "%s://%s:%u%s",
+             scheme, request.address.c_str(),
+             static_cast<unsigned>(request.port),
+             request.target.c_str());
+
+    connId = sceHttpCreateConnectionWithURL(tmplId, urlBuf, 1);
+    if (connId < 0) {
+        httpDiagPrint("[http] sceHttpCreateConnectionWithURL failed");
+        sceHttpDeleteTemplate(tmplId);
+        return HttpResult(HttpResultCategory::ConnectionFailure,
+                          static_cast<uint32_t>(connId));
+    }
+
+    reqId = sceHttpCreateRequestWithURL(connId, ORBIS_METHOD_GET, urlBuf, 0);
+    if (reqId < 0) {
+        httpDiagPrint("[http] sceHttpCreateRequestWithURL failed");
+        sceHttpDeleteConnection(connId);
+        sceHttpDeleteTemplate(tmplId);
+        return HttpResult(HttpResultCategory::SdkFailure,
+                          static_cast<uint32_t>(reqId));
+    }
+
+    sceHttpSetConnectTimeOut(reqId, request.connectTimeoutMs * 1000);
+    sceHttpSetSendTimeOut(reqId, request.ioTimeoutMs * 1000);
+    httpSetRecvTimeOut(reqId, request.ioTimeoutMs * 1000);
+
+    if (request.useTls) {
+        sceHttpsDisableOption(reqId,
+                              kHttpsFlagCnCheck |
+                              kHttpsFlagKnownCaCheck);
+    }
+
+    if (!request.hostHeader.empty()) {
+        sceHttpAddRequestHeader(reqId, "Host", request.hostHeader.c_str(),
+                                kHttpHeaderOverwrite);
+    }
+
+    for (const auto& h : request.headers) {
+        sceHttpAddRequestHeader(reqId, h.name.c_str(), h.value.c_str(),
+                                kHttpHeaderAdd);
+    }
+
+    if (cancellation != nullptr && cancellation->cancelled()) {
+        result = HttpResult(HttpResultCategory::Cancelled);
+        goto cleanup;
+    }
+
+    if (cancellation != nullptr) {
+        cancellation->setAbort(httpAbortRequest, &reqId);
+    }
+
+    rc = sceHttpSendRequest(reqId, nullptr, 0);
+    if (rc < 0) {
+        char dbg[256];
+        snprintf(dbg, sizeof(dbg),
+                 "[http] sceHttpSendRequest failed (rc=0x%08X urlLen=%zu)",
+                 static_cast<uint32_t>(rc), strlen(urlBuf));
+        httpDiagPrint(dbg);
+        result = HttpResult(HttpResultCategory::SendFailure,
+                            static_cast<uint32_t>(rc));
+        goto cleanup;
+    }
+
+    rc = sceHttpGetStatusCode(reqId, &statusCode);
+    if (rc < 0) {
+        httpDiagPrint("[http] sceHttpGetStatusCode failed");
+        result = HttpResult(HttpResultCategory::MalformedResponse,
+                            static_cast<uint32_t>(rc));
+        goto cleanup;
+    }
+    response.statusCode = statusCode;
+
+    if (statusCode < 200 || statusCode >= 300) {
+        char dbg[128];
+        snprintf(dbg, sizeof(dbg), "[http] download failed with HTTP status %d", statusCode);
+        httpDiagPrint(dbg);
+        result = HttpResult(HttpResultCategory::MalformedResponse);
+        goto cleanup;
+    }
+
+    rc = sceHttpGetResponseContentLength(reqId, &contentLengthType, &contentLength);
+    if (rc < 0 || contentLengthType != ORBIS_HTTP_CONTENTLEN_EXIST) {
+        contentLength = 0;
+    }
+
+    // Ensure parent directory exists
+    {
+        size_t lastSlash = destinationPath.find_last_of("/\\");
+        if (lastSlash != std::string::npos) {
+            std::string dir = destinationPath.substr(0, lastSlash);
+            mkdir("/data", 0777);
+            mkdir(dir.c_str(), 0777);
+        }
+    }
+
+    // Open temporary file
+    outFile = fopen(tmpPath.c_str(), "wb");
+    if (!outFile) {
+        char dbg[256];
+        snprintf(dbg, sizeof(dbg), "[http] failed to open %s for writing", tmpPath.c_str());
+        httpDiagPrint(dbg);
+        result = HttpResult(HttpResultCategory::InvalidRequest);
+        goto cleanup;
+    }
+
+    // Stream directly into file
+    {
+        uint64_t downloadedBytes = 0;
+        constexpr size_t kDownloadChunkSize = 32 * 1024;
+        uint8_t buf[kDownloadChunkSize];
+
+        for (;;) {
+            if (cancellation != nullptr && cancellation->cancelled()) {
+                sceHttpAbortRequest(reqId);
+                result = HttpResult(HttpResultCategory::Cancelled);
+                break;
+            }
+
+            rc = sceHttpReadData(reqId, buf, sizeof(buf));
+            if (rc == 0) {
+                break; // EOF
+            }
+            if (rc < 0) {
+                httpDiagPrint("[http] sceHttpReadData failed during download");
+                result = HttpResult(HttpResultCategory::ReceiveFailure,
+                                    static_cast<uint32_t>(rc));
+                break;
+            }
+
+            size_t written = fwrite(buf, 1, static_cast<size_t>(rc), outFile);
+            if (written != static_cast<size_t>(rc)) {
+                httpDiagPrint("[http] fwrite failed during download");
+                result = HttpResult(HttpResultCategory::ReceiveFailure);
+                break;
+            }
+
+            downloadedBytes += static_cast<uint64_t>(rc);
+            if (progressFn != nullptr) {
+                progressFn(downloadedBytes, contentLength, userCtx);
+            }
+        }
+    }
+
+cleanup:
+    if (cancellation != nullptr) {
+        cancellation->clearAbort();
+    }
+    if (reqId >= 0) {
+        sceHttpDeleteRequest(reqId);
+    }
+    if (connId >= 0) {
+        sceHttpDeleteConnection(connId);
+    }
+    if (tmplId >= 0) {
+        sceHttpDeleteTemplate(tmplId);
+    }
+
+    if (outFile != nullptr) {
+        fclose(outFile);
+        outFile = nullptr;
+    }
+
+    if (result.succeeded()) {
+        remove(destinationPath.c_str());
+        if (rename(tmpPath.c_str(), destinationPath.c_str()) != 0) {
+            httpDiagPrint("[http] failed to rename downloaded file from .tmp");
+            remove(tmpPath.c_str());
+            result = HttpResult(HttpResultCategory::ReceiveFailure);
+        } else {
+            httpDiagPrint("[http] download completed successfully");
+        }
+    } else {
+        remove(tmpPath.c_str());
     }
 
     return result;
