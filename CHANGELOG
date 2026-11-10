@@ -1,3 +1,10 @@
+V3.20 - 2026-11-10
+	Add automatic update check against GitHub Releases on startup with one-click download and installation
+	Add manual "Check for Updates" action in Settings under the CLIENT section
+	Add download progress modal with real-time transfer rate, progress bar, percentage, and cancellation support
+	Add chunked HTTP/HTTPS streaming download directly to disk to prevent RAM buffering of PKG packages
+	Add automatic PKG staging to /data/pkg/ for GoldHEN Package Installer compatibility and native libSceAppInstUtil installation trigger
+
 V3.10 - 2026-11-09
 	Fix black screen with audio on PS5 ProsperoSunshine by rendering hardware-concealed error frames during Periodic Intra-Refresh (PIR) sweeps
 	Restore 30-frame drop timeout for WaitingForIdr before falling back to Running without dropping the frame
