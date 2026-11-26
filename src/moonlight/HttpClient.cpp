@@ -50,6 +50,7 @@
 #include <cstdio>                // printf, fflush, snprintf
 #include <cstdlib>               // atoi
 #include <cstring>               // memset
+#include <pthread.h>
 #include <string>
 #include <vector>
 #include <sys/stat.h>            // mkdir
@@ -192,6 +193,15 @@ struct HttpClient::Impl {
     int netPoolId = -1;    ///< sceNetPoolCreate result.
     int sslCtxId  = -1;    ///< sceSslInit result.
     int httpCtxId = -1;    ///< sceHttpInit result.
+
+    // --- Mutual TLS serialization -------------------------------------------
+    // sceHttpsLoadCert / sceHttpsUnloadCert mutate the shared httpCtxId
+    // globally. Serialize mTLS requests so concurrent worker threads
+    // (ServerInfoManager, AppArtworkManager, PairingManager,
+    // ApplicationSessionManager) cannot unload each other's client cert
+    // mid-handshake.
+    pthread_mutex_t mTlsMutex = PTHREAD_MUTEX_INITIALIZER;
+    bool mTlsMutexInit = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -259,6 +269,12 @@ HttpResult HttpClient::initialize() {
     }
     m_impl->httpCtxId = rc;
 
+    if (!m_impl->mTlsMutexInit) {
+        if (pthread_mutex_init(&m_impl->mTlsMutex, nullptr) == 0) {
+            m_impl->mTlsMutexInit = true;
+        }
+    }
+
     m_impl->initialized = true;
     httpDiagPrint("[http] initialization success");
     return HttpResult();
@@ -287,6 +303,11 @@ void HttpClient::shutdown() {
     if (m_impl->netPoolId >= 0) {
         sceNetPoolDestroy(m_impl->netPoolId);
         m_impl->netPoolId = -1;
+    }
+
+    if (m_impl->mTlsMutexInit) {
+        pthread_mutex_destroy(&m_impl->mTlsMutex);
+        m_impl->mTlsMutexInit = false;
     }
 
     m_impl->initialized = false;
@@ -348,11 +369,25 @@ HttpResult HttpClient::perform(const HttpRequest& request,
     int tmplId = -1;
     int rc = 0;
     bool clientCertLoaded = false;
+    bool mTlsLocked = false;
     int32_t statusCode = 0;
     int contentLengthType = 0;
     uint64_t contentLength = 0;
 
     HttpResult result;   // defaults to Success
+
+    // Serialize mutual TLS requests across threads because sceHttpsLoadCert /
+    // sceHttpsUnloadCert operate on the shared httpCtxId.
+    const bool needsClientCert = request.useTls && !request.tls.clientCertPem.empty();
+    if (needsClientCert && m_impl->mTlsMutexInit) {
+        pthread_mutex_lock(&m_impl->mTlsMutex);
+        mTlsLocked = true;
+        // Re-check cancellation after acquiring the lock.
+        if (cancellation != nullptr && cancellation->cancelled()) {
+            result = HttpResult(HttpResultCategory::Cancelled);
+            goto cleanup;
+        }
+    }
 
     // --- Per-request template ------------------------------------------------
     // A fresh template per request avoids any cross-request state
@@ -361,8 +396,9 @@ HttpResult HttpClient::perform(const HttpRequest& request,
                                    ORBIS_HTTP_VERSION_1_1, 1);
     if (tmplId < 0) {
         httpDiagPrint("[http] sceHttpCreateTemplate failed");
-        return HttpResult(HttpResultCategory::HttpInitializationFailure,
-                          static_cast<uint32_t>(tmplId));
+        result = HttpResult(HttpResultCategory::HttpInitializationFailure,
+                            static_cast<uint32_t>(tmplId));
+        goto cleanup;
     }
 
     // --- Configure HTTPS on the template if needed --------------------------
@@ -374,14 +410,14 @@ HttpResult HttpClient::perform(const HttpRequest& request,
         rc = sceHttpsSetSslCallback(tmplId, sslVerifyCallback, nullptr);
         if (rc < 0) {
             httpDiagPrint("[http] sceHttpsSetSslCallback(template) failed");
-            sceHttpDeleteTemplate(tmplId);
-            return HttpResult(HttpResultCategory::SdkFailure,
-                              static_cast<uint32_t>(rc));
+            result = HttpResult(HttpResultCategory::SdkFailure,
+                                static_cast<uint32_t>(rc));
+            goto cleanup;
         }
     }
 
     // --- Load client certificate/key for mutual TLS (if provided) ----------
-    if (request.useTls && !request.tls.clientCertPem.empty()) {
+    if (needsClientCert) {
         // The OpenOrbis SDK declares sceHttpsLoadCert with void* parameters
         // (the real PS4 signature uses SceSslData structs). The actual library
         // function expects SceSslData* for the cert and key. Define the struct
@@ -404,44 +440,36 @@ HttpResult HttpClient::perform(const HttpRequest& request,
                               &certData, &keyData);
         if (rc < 0) {
             httpDiagPrint("[http] sceHttpsLoadCert failed");
-            sceHttpDeleteTemplate(tmplId);
-            return HttpResult(HttpResultCategory::TlsCertificateFailure,
-                              static_cast<uint32_t>(rc));
+            result = HttpResult(HttpResultCategory::TlsCertificateFailure,
+                                static_cast<uint32_t>(rc));
+            goto cleanup;
         }
         clientCertLoaded = true;
     }
 
     // --- Build the full URL and create connection/request ------------------
-    const char* scheme = request.useTls ? "https" : "http";
     char urlBuf[kMaxTargetLen + 64];
     snprintf(urlBuf, sizeof(urlBuf), "%s://%s:%u%s",
-             scheme, request.address.c_str(),
+             request.useTls ? "https" : "http",
+             request.address.c_str(),
              static_cast<unsigned>(request.port),
              request.target.c_str());
 
     connId = sceHttpCreateConnectionWithURL(tmplId, urlBuf, 1);
     if (connId < 0) {
         httpDiagPrint("[http] sceHttpCreateConnectionWithURL failed");
-        if (clientCertLoaded) {
-            httpHttpsUnloadCert(m_impl->httpCtxId);
-        }
-        sceHttpDeleteTemplate(tmplId);
-        return HttpResult(HttpResultCategory::ConnectionFailure,
-                          static_cast<uint32_t>(connId));
+        result = HttpResult(HttpResultCategory::ConnectionFailure,
+                            static_cast<uint32_t>(connId));
+        goto cleanup;
     }
 
     // --- Create request -----------------------------------------------------
-    int method = ORBIS_METHOD_GET;   // Only GET is currently supported.
-    reqId = sceHttpCreateRequestWithURL(connId, method, urlBuf, 0);
+    reqId = sceHttpCreateRequestWithURL(connId, ORBIS_METHOD_GET, urlBuf, 0);
     if (reqId < 0) {
         httpDiagPrint("[http] sceHttpCreateRequestWithURL failed");
-        sceHttpDeleteConnection(connId);
-        if (clientCertLoaded) {
-            httpHttpsUnloadCert(m_impl->httpCtxId);
-        }
-        sceHttpDeleteTemplate(tmplId);
-        return HttpResult(HttpResultCategory::SdkFailure,
-                          static_cast<uint32_t>(reqId));
+        result = HttpResult(HttpResultCategory::SdkFailure,
+                            static_cast<uint32_t>(reqId));
+        goto cleanup;
     }
 
     // --- Configure timeouts -------------------------------------------------
@@ -583,6 +611,9 @@ cleanup:
     // Delete the per-request template last (after connection/request).
     if (tmplId >= 0) {
         sceHttpDeleteTemplate(tmplId);
+    }
+    if (mTlsLocked) {
+        pthread_mutex_unlock(&m_impl->mTlsMutex);
     }
 
     return result;

@@ -559,6 +559,7 @@ void* ServerInfoManager::serverInfoWorker(void* arg) {
                 // PairStatus=0 so the unpair is detected (matching the
                 // reference implementation).
                 if (target.useTls && httpsPort != 0) {
+                    update.authenticatedTls = true;
                     ServerInfo parsed;
                     ServerInfoAttempt outcome = performServerInfoAttempt(
                         impl->httpClient, target, addr, true, httpsPort,

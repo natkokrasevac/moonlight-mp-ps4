@@ -553,8 +553,8 @@ void* ApplicationSessionManager::launchWorker(void* arg) {
         httpReq.tls.trustMode = HttpTlsTrustMode::Unverified;
         httpReq.tls.clientCertPem = target.clientCertPem;
         httpReq.tls.clientKeyPem = target.clientKeyPem;
-        httpReq.connectTimeoutMs = 3000;
-        httpReq.ioTimeoutMs = 5000;
+        httpReq.connectTimeoutMs = 10000;
+        httpReq.ioTimeoutMs = 30000;
 
         // --- Execute the request -------------------------------------------
         HttpResponse httpResp;
@@ -1071,7 +1071,11 @@ ApplicationLaunchResult ApplicationSessionManager::request(const ApplicationLaun
     m_impl->resultQueue.clear();
     pthread_mutex_unlock(&m_impl->resultMutex);
 
-    // Create the worker thread.
+    // Create the worker thread (join any completed prior worker first).
+    if (m_impl->threadCreated) {
+        pthread_join(m_impl->workerThread, nullptr);
+        m_impl->threadCreated = false;
+    }
     int rc = pthread_create(&m_impl->workerThread, nullptr,
                             launchWorker, m_impl);
     if (rc != 0) {
@@ -1125,7 +1129,11 @@ ApplicationLaunchResult ApplicationSessionManager::requestQuit(const Application
     m_impl->quitResultQueue.clear();
     pthread_mutex_unlock(&m_impl->resultMutex);
 
-    // Create the worker thread.
+    // Create the worker thread (join any completed prior worker first).
+    if (m_impl->threadCreated) {
+        pthread_join(m_impl->workerThread, nullptr);
+        m_impl->threadCreated = false;
+    }
     int rc = pthread_create(&m_impl->workerThread, nullptr,
                             quitWorker, m_impl);
     if (rc != 0) {

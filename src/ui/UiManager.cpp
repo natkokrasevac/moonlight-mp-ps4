@@ -560,9 +560,9 @@ void UiManager::setPairingView(const PairingViewState& view) {
 
     switch (merged.state) {
     case PairingPresentationState::Cancelled:
-    case PairingPresentationState::Failed:
         m_impl->screen = UiScreen::HostList;
         break;
+    case PairingPresentationState::Failed:
     case PairingPresentationState::Succeeded:
     default:
         m_impl->screen = UiScreen::Pairing;
@@ -2032,8 +2032,15 @@ void UiManager::processInput(const UiInput& input) {
         return;
     }
 
-    // Pairing screen: Back cancels pairing.
+    // Pairing screen: Back cancels active pairing, or Back/Accept dismisses a Failed screen.
     if (m_impl->screen == UiScreen::Pairing) {
+        if (m_impl->pairingView.state == PairingPresentationState::Failed) {
+            if (input.backPressed || input.acceptPressed) {
+                m_impl->screen = UiScreen::HostList;
+                m_impl->pendingSoundIntent = UiSoundIntent::Back;
+            }
+            return;
+        }
         if (input.backPressed) {
             m_impl->pendingIntent = UiIntent(UiIntentType::CancelPairing);
             m_impl->pendingSoundIntent = UiSoundIntent::Back;

@@ -469,6 +469,35 @@ bool extractXmlTag(const uint8_t* data, size_t size,
     return true;
 }
 
+/// Safely extract an XML attribute value (e.g. status_message="...") from <root ...>.
+bool extractRootXmlAttr(const uint8_t* data, size_t size,
+                        const char* attrName, std::string& outValue) {
+    if (data == nullptr || attrName == nullptr) {
+        return false;
+    }
+    const std::string xml(reinterpret_cast<const char*>(data), size);
+    const size_t rootStart = xml.find("<root");
+    if (rootStart == std::string::npos) {
+        return false;
+    }
+    const size_t rootEnd = xml.find('>', rootStart);
+    if (rootEnd == std::string::npos) {
+        return false;
+    }
+    const std::string needle = std::string(attrName) + "=\"";
+    const size_t attrPos = xml.find(needle, rootStart);
+    if (attrPos == std::string::npos || attrPos >= rootEnd) {
+        return false;
+    }
+    const size_t valStart = attrPos + needle.size();
+    const size_t valEnd = xml.find('"', valStart);
+    if (valEnd == std::string::npos || valEnd > rootEnd) {
+        return false;
+    }
+    outValue = xml.substr(valStart, valEnd - valStart);
+    return !outValue.empty();
+}
+
 /// Parse a decimal integer from a string.
 bool parseDecimal(const std::string& text, int& outValue) {
     if (text.empty()) {
@@ -699,6 +728,30 @@ void* PairingManager::pairingWorker(void* arg) {
         return nullptr;
     };
 
+    // Best-effort /unpair cleanup after a partial handshake failure or cancel
+    // so Sunshine/Vibeshine does not keep stale pairing state.
+    auto sendUnpairBestEffort = [impl](const std::string& hostAddr, uint16_t httpPort) {
+        if (!impl->httpClient || hostAddr.empty()) {
+            return;
+        }
+        std::string unpairUuid;
+        if (!generateUuid(unpairUuid)) {
+            return;
+        }
+        HttpRequest unpairReq;
+        unpairReq.method = HttpMethod::Get;
+        unpairReq.address = hostAddr;
+        unpairReq.port = (httpPort != 0) ? httpPort : kDefaultHttpPort;
+        unpairReq.target = "/unpair?uniqueid=" + impl->identity.uniqueId +
+                           "&uuid=" + unpairUuid;
+        unpairReq.useTls = false;
+        unpairReq.connectTimeoutMs = 2000;
+        unpairReq.ioTimeoutMs = 2000;
+        HttpResponse unpairResp;
+        impl->httpClient->perform(unpairReq, unpairResp, nullptr);
+        pmDiagPrint("[pairing] sent best-effort /unpair cleanup");
+    };
+
     // --- Check cancellation before starting ---------------------------------
     if (impl->cancelRequested.load() || impl->stopRequested.load()) {
         pushUpdate(PairingUpdateType::Cancelled, "Pairing cancelled.");
@@ -798,7 +851,10 @@ void* PairingManager::pairingWorker(void* arg) {
             // PIN entry; the request is interrupted promptly when the user
             // cancels pairing (CancelPairing intent fires the cancellation
             // token). This ties the PIN wait to the pairing screen being open.
-            httpReq.connectTimeoutMs = 120000;
+            // TCP connect should fail fast (10 s) if port 47989 is unreachable
+            // or an earlier IP is stale, while receive I/O waits up to 120 s
+            // for the user to enter the PIN on the host.
+            httpReq.connectTimeoutMs = 10000;
             httpReq.ioTimeoutMs = 120000;
 
             // Diagnostic: log the Stage 1 request details (address, port, URL
@@ -821,10 +877,21 @@ void* PairingManager::pairingWorker(void* arg) {
                 return finishWorker();
             }
             if (!httpResult.succeeded()) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg),
+                         "[pairing] stage1 HTTP failed addr='%s' port=%u cat=%d err=0x%08X",
+                         addr.c_str(), static_cast<unsigned>(httpReq.port),
+                         static_cast<int>(httpResult.category), httpResult.nativeError);
+                pmDiagPrint(dbg);
                 continue;   // Try next address.
             }
             if (httpResp.statusCode != 200) {
-                pushUpdate(PairingUpdateType::Failed, "Host rejected pairing request.",
+                std::string hostMsg;
+                if (!httpResp.body.empty() && httpResp.body.size() <= kMaxPairingBodySize) {
+                    extractRootXmlAttr(httpResp.body.data(), httpResp.body.size(), "status_message", hostMsg);
+                }
+                pushUpdate(PairingUpdateType::Failed,
+                           hostMsg.empty() ? "Host rejected pairing request." : hostMsg.c_str(),
                            std::string(), PairingResultCategory::ProtocolFailure);
                 return finishWorker();
             }
@@ -834,11 +901,28 @@ void* PairingManager::pairingWorker(void* arg) {
                 return finishWorker();
             }
 
+            // Check root status_code / status_message first (e.g. ProsperoSunshine
+            // 0.6.5+ returns <root status_code="403" status_message="..."><paired>0</paired></root>
+            // without <plaincert> when Pair over the internet is disabled).
+            {
+                std::string rootStatusStr;
+                int rootStatus = 200;
+                if (extractRootXmlAttr(httpResp.body.data(), httpResp.body.size(),
+                                       "status_code", rootStatusStr) &&
+                    parseDecimal(rootStatusStr, rootStatus) && rootStatus != 200) {
+                    std::string hostMsg;
+                    extractRootXmlAttr(httpResp.body.data(), httpResp.body.size(),
+                                       "status_message", hostMsg);
+                    pushUpdate(PairingUpdateType::Failed,
+                               hostMsg.empty() ? "Host rejected pairing request." : hostMsg.c_str(),
+                               std::string(), PairingResultCategory::ProtocolFailure);
+                    return finishWorker();
+                }
+            }
+
             // Parse the response: <paired> and <plaincert>.
             std::string pairedText;
-            std::string plainCertHex;
-            if (!extractXmlTag(httpResp.body.data(), httpResp.body.size(), "paired", pairedText) ||
-                !extractXmlTag(httpResp.body.data(), httpResp.body.size(), "plaincert", plainCertHex)) {
+            if (!extractXmlTag(httpResp.body.data(), httpResp.body.size(), "paired", pairedText)) {
                 pushUpdate(PairingUpdateType::Failed, "Invalid pairing response.",
                            std::string(), PairingResultCategory::MalformedResponse);
                 return finishWorker();
@@ -846,8 +930,19 @@ void* PairingManager::pairingWorker(void* arg) {
 
             int pairedValue = 0;
             if (!parseDecimal(pairedText, pairedValue) || pairedValue != 1) {
-                pushUpdate(PairingUpdateType::Failed, "Host rejected pairing request.",
+                std::string hostMsg;
+                extractRootXmlAttr(httpResp.body.data(), httpResp.body.size(),
+                                   "status_message", hostMsg);
+                pushUpdate(PairingUpdateType::Failed,
+                           hostMsg.empty() ? "Host rejected pairing request." : hostMsg.c_str(),
                            std::string(), PairingResultCategory::ProtocolFailure);
+                return finishWorker();
+            }
+
+            std::string plainCertHex;
+            if (!extractXmlTag(httpResp.body.data(), httpResp.body.size(), "plaincert", plainCertHex)) {
+                pushUpdate(PairingUpdateType::Failed, "Invalid pairing response.",
+                           std::string(), PairingResultCategory::MalformedResponse);
                 return finishWorker();
             }
 
@@ -927,23 +1022,34 @@ void* PairingManager::pairingWorker(void* arg) {
             stage2Req.port = (target.discoveryPort != 0) ? target.discoveryPort : kDefaultHttpPort;
             stage2Req.target = stage2Target;
             stage2Req.useTls = false;
-            stage2Req.connectTimeoutMs = 3000;
-            stage2Req.ioTimeoutMs = 5000;
+            stage2Req.connectTimeoutMs = 10000;
+            stage2Req.ioTimeoutMs = 15000;
 
             HttpResponse stage2Resp;
             HttpResult stage2Result = impl->httpClient->perform(stage2Req, stage2Resp, &requestCancellation);
 
             if (impl->cancelRequested.load() || impl->stopRequested.load()) {
+                sendUnpairBestEffort(addr, stage2Req.port);
                 pushUpdate(PairingUpdateType::Cancelled, "Pairing cancelled.");
                 return finishWorker();
             }
             if (!stage2Result.succeeded()) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage2 HTTP failed cat=%d err=0x%08X",
+                         static_cast<int>(stage2Result.category), stage2Result.nativeError);
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, stage2Req.port);
                 pushUpdate(PairingUpdateType::Failed, "Unable to contact host.",
                            std::string(), PairingResultCategory::TransportFailure);
                 return finishWorker();
             }
             if (stage2Resp.statusCode != 200 || stage2Resp.body.empty() ||
                 stage2Resp.body.size() > kMaxPairingBodySize) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage2 invalid response status=%d len=%zu",
+                         stage2Resp.statusCode, stage2Resp.body.size());
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, stage2Req.port);
                 pushUpdate(PairingUpdateType::Failed, "Invalid pairing response.",
                            std::string(), PairingResultCategory::MalformedResponse);
                 return finishWorker();
@@ -1057,23 +1163,34 @@ void* PairingManager::pairingWorker(void* arg) {
             stage3Req.port = (target.discoveryPort != 0) ? target.discoveryPort : kDefaultHttpPort;
             stage3Req.target = stage3Target;
             stage3Req.useTls = false;
-            stage3Req.connectTimeoutMs = 3000;
-            stage3Req.ioTimeoutMs = 5000;
+            stage3Req.connectTimeoutMs = 10000;
+            stage3Req.ioTimeoutMs = 15000;
 
             HttpResponse stage3Resp;
             HttpResult stage3Result = impl->httpClient->perform(stage3Req, stage3Resp, &requestCancellation);
 
             if (impl->cancelRequested.load() || impl->stopRequested.load()) {
+                sendUnpairBestEffort(addr, stage3Req.port);
                 pushUpdate(PairingUpdateType::Cancelled, "Pairing cancelled.");
                 return finishWorker();
             }
             if (!stage3Result.succeeded()) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage3 HTTP failed cat=%d err=0x%08X",
+                         static_cast<int>(stage3Result.category), stage3Result.nativeError);
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, stage3Req.port);
                 pushUpdate(PairingUpdateType::Failed, "Unable to contact host.",
                            std::string(), PairingResultCategory::TransportFailure);
                 return finishWorker();
             }
             if (stage3Resp.statusCode != 200 || stage3Resp.body.empty() ||
                 stage3Resp.body.size() > kMaxPairingBodySize) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage3 invalid response status=%d len=%zu",
+                         stage3Resp.statusCode, stage3Resp.body.size());
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, stage3Req.port);
                 pushUpdate(PairingUpdateType::Failed, "Invalid pairing response.",
                            std::string(), PairingResultCategory::MalformedResponse);
                 return finishWorker();
@@ -1157,23 +1274,34 @@ void* PairingManager::pairingWorker(void* arg) {
             stage4Req.port = (target.discoveryPort != 0) ? target.discoveryPort : kDefaultHttpPort;
             stage4Req.target = stage4Target;
             stage4Req.useTls = false;
-            stage4Req.connectTimeoutMs = 3000;
-            stage4Req.ioTimeoutMs = 5000;
+            stage4Req.connectTimeoutMs = 10000;
+            stage4Req.ioTimeoutMs = 15000;
 
             HttpResponse stage4Resp;
             HttpResult stage4Result = impl->httpClient->perform(stage4Req, stage4Resp, &requestCancellation);
 
             if (impl->cancelRequested.load() || impl->stopRequested.load()) {
+                sendUnpairBestEffort(addr, stage4Req.port);
                 pushUpdate(PairingUpdateType::Cancelled, "Pairing cancelled.");
                 return finishWorker();
             }
             if (!stage4Result.succeeded()) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage4 HTTP failed cat=%d err=0x%08X",
+                         static_cast<int>(stage4Result.category), stage4Result.nativeError);
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, stage4Req.port);
                 pushUpdate(PairingUpdateType::Failed, "Unable to contact host.",
                            std::string(), PairingResultCategory::TransportFailure);
                 return finishWorker();
             }
             if (stage4Resp.statusCode != 200 || stage4Resp.body.empty() ||
                 stage4Resp.body.size() > kMaxPairingBodySize) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage4 invalid response status=%d len=%zu",
+                         stage4Resp.statusCode, stage4Resp.body.size());
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, stage4Req.port);
                 pushUpdate(PairingUpdateType::Failed, "Invalid pairing response.",
                            std::string(), PairingResultCategory::MalformedResponse);
                 return finishWorker();
@@ -1219,23 +1347,38 @@ void* PairingManager::pairingWorker(void* arg) {
             stage5Req.tls.trustMode = HttpTlsTrustMode::Unverified;
             stage5Req.tls.clientCertPem = impl->identity.certPem;
             stage5Req.tls.clientKeyPem = impl->identity.keyPem;
-            stage5Req.connectTimeoutMs = 3000;
-            stage5Req.ioTimeoutMs = 5000;
+            stage5Req.connectTimeoutMs = 10000;
+            stage5Req.ioTimeoutMs = 15000;
 
             HttpResponse stage5Resp;
             HttpResult stage5Result = impl->httpClient->perform(stage5Req, stage5Resp, &requestCancellation);
 
             if (impl->cancelRequested.load() || impl->stopRequested.load()) {
+                sendUnpairBestEffort(addr, target.discoveryPort);
                 pushUpdate(PairingUpdateType::Cancelled, "Pairing cancelled.");
                 return finishWorker();
             }
             if (!stage5Result.succeeded()) {
-                pushUpdate(PairingUpdateType::Failed, "Unable to confirm pairing.",
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage5 HTTPS failed port=%u cat=%d err=0x%08X",
+                         static_cast<unsigned>(stage5Req.port),
+                         static_cast<int>(stage5Result.category), stage5Result.nativeError);
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, target.discoveryPort);
+                char msg[96];
+                snprintf(msg, sizeof(msg), "Unable to confirm pairing on HTTPS port %u.",
+                         static_cast<unsigned>(stage5Req.port));
+                pushUpdate(PairingUpdateType::Failed, msg,
                            std::string(), PairingResultCategory::TransportFailure);
                 return finishWorker();
             }
             if (stage5Resp.statusCode != 200 || stage5Resp.body.empty() ||
                 stage5Resp.body.size() > kMaxPairingBodySize) {
+                char dbg[160];
+                snprintf(dbg, sizeof(dbg), "[pairing] stage5 invalid response status=%d len=%zu",
+                         stage5Resp.statusCode, stage5Resp.body.size());
+                pmDiagPrint(dbg);
+                sendUnpairBestEffort(addr, target.discoveryPort);
                 pushUpdate(PairingUpdateType::Failed, "Invalid pairing response.",
                            std::string(), PairingResultCategory::MalformedResponse);
                 return finishWorker();
@@ -1298,7 +1441,12 @@ void* PairingManager::pairingWorker(void* arg) {
         }
 
         if (!stageDone) {
-            pushUpdate(PairingUpdateType::Failed, "Unable to contact host.",
+            const uint16_t failedPort =
+                (target.discoveryPort != 0) ? target.discoveryPort : kDefaultHttpPort;
+            char msg[96];
+            snprintf(msg, sizeof(msg), "Unable to contact host on HTTP port %u.",
+                     static_cast<unsigned>(failedPort));
+            pushUpdate(PairingUpdateType::Failed, msg,
                        std::string(), PairingResultCategory::TransportFailure);
             return finishWorker();
         }
@@ -1539,7 +1687,11 @@ PairingResult PairingManager::startPairing(const PairingTarget& target) {
     m_impl->updateQueue.clear();
     pthread_mutex_unlock(&m_impl->updateMutex);
 
-    // Create the worker thread.
+    // Create the worker thread (join any completed prior worker first).
+    if (m_impl->threadCreated) {
+        pthread_join(m_impl->workerThread, nullptr);
+        m_impl->threadCreated = false;
+    }
     int rc = pthread_create(&m_impl->workerThread, nullptr,
                             pairingWorker, m_impl);
     if (rc != 0) {

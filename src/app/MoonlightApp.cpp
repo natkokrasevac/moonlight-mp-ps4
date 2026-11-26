@@ -134,7 +134,7 @@ static constexpr uint64_t kAppListPollIntervalUs = 1000000ull;
 /// Normal serverinfo requests can remain pending for a long time against an
 /// unreachable IP; a fallback probe must use a short bound so it does not
 /// occupy the ServerInfoManager worker for tens of seconds.
-static constexpr uint32_t kPairedHostProbeTimeoutMs = 1500;
+static constexpr uint32_t kPairedHostProbeTimeoutMs = 3500;
 
 /// Diagnostic verbosity: log the per-request serverinfo "applied" line.
 /// Default OFF to keep the klog quiet during normal operation.
@@ -1560,8 +1560,16 @@ void MoonlightApp::processAsyncResults(uint64_t nowMs) {
                     m_pairingManager &&
                     m_pairingManager->hasLocalTrustForServer(host->serverId) &&
                     !siUpdate.info.serverReportsPaired) {
-                    diagPrint("[app] host unpaired this client on the server side; unpairing locally");
-                    handleServerSideUnpair(siUpdate.hostId);
+                    if (siUpdate.authenticatedTls) {
+                        diagPrint("[app] host unpaired this client on the server side; unpairing locally");
+                        handleServerSideUnpair(siUpdate.hostId);
+                    } else {
+                        // A plain-HTTP serverinfo scheduled before pairing completed
+                        // always reports PairStatus=0 on Sunshine. Do not delete the
+                        // new pairing; schedule an authenticated HTTPS query instead.
+                        diagPrint("[app] ignoring unauthenticated PairStatus=0 for trusted host; scheduling HTTPS serverinfo");
+                        scheduleServerInfoQuery(siUpdate.hostId);
+                    }
                 } else {
                     // Reconcile pairing state using local trust + server evidence.
                     reconcileHostPairingState(siUpdate.hostId);
@@ -5530,9 +5538,13 @@ void MoonlightApp::handleStreamSessionUpdate(const ml::StreamSessionUpdate& upda
         break;
     case ml::StreamSessionUpdateType::Connected:
         diagPrint("[stream] update: connected (stream established)");
-        // The stream is now established. The transient Connecting state is
-        // superseded by the Running presentation (Host.currentGame is
-        // authoritative). Clear the local Connecting state.
+        // The stream is now established. Clear any active auto-reconnect state
+        // and the transient Connecting state (superseded by Host.currentGame).
+        m_reconnecting = false;
+        m_reconnectHostId = 0;
+        m_reconnectAppId = 0;
+        m_reconnectDeadlineUs = 0;
+        m_reconnectAttempts = 0;
         clearConnectingState();
         // Enter stream presentation mode: the main thread presents decoded
         // video frames instead of the CPU UI compositor.

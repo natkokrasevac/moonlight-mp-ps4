@@ -647,7 +647,11 @@ ApplicationCatalogResult ApplicationCatalog::request(const ApplicationCatalogTar
     m_impl->resultQueue.clear();
     pthread_mutex_unlock(&m_impl->resultMutex);
 
-    // Create the worker thread.
+    // Create the worker thread (join any completed prior worker first).
+    if (m_impl->threadCreated) {
+        pthread_join(m_impl->workerThread, nullptr);
+        m_impl->threadCreated = false;
+    }
     int rc = pthread_create(&m_impl->workerThread, nullptr,
                             catalogWorker, m_impl);
     if (rc != 0) {

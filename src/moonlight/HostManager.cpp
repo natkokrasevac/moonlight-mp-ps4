@@ -588,6 +588,21 @@ std::vector<HostId> HostManager::updateAvailability(uint64_t nowMs) {
             continue;
         }
 
+        // An unpaired manually-added host is neither observed via mDNS nor
+        // periodically probed via authenticated HTTPS. Keep it in ManuallyAdded
+        // once its initial serverinfo reachability ages out so the user can
+        // always re-attempt pairing without restarting the app.
+        if (!host.observedOnNetwork &&
+            host.pairingState != HostPairingState::Paired) {
+            const uint64_t age = nowMs - host.lastReachabilityConfirmedMs;
+            if (age >= kHostStaleAfterMs &&
+                host.availability != HostAvailability::ManuallyAdded) {
+                host.availability = HostAvailability::ManuallyAdded;
+                changed.push_back(host.id);
+            }
+            continue;
+        }
+
         // Availability aging uses the most recent of the mDNS observation time
         // and the HTTPS reachability confirmation time. This lets a host stay
         // Online via fallback HTTPS probes even when mDNS is unavailable.

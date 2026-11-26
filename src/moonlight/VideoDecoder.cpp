@@ -272,7 +272,9 @@ constexpr size_t kDecodedQueueDepth = 2;
 constexpr size_t kUpdateQueueCapacity = 8;
 
 /// Encoded-unit input queue capacity.
-constexpr size_t kInputQueueCapacity = 8;
+/// Sized so transient setup / sequence-reset stalls do not evict initial IDR
+/// or reference frames during 60 fps bursts.
+constexpr size_t kInputQueueCapacity = 32;
 
 /// Maximum encoded video unit size (bytes).
 /// Sized to accommodate high-bitrate (40/80 Mbps) and 4K IDR keyframes.
@@ -1098,6 +1100,13 @@ bool VideoDecoder::Impl::escalateDecoderForOversize() {
     if (api.QueryDecoderMemoryInfo(&dc, &dm) != 0) {
         return false;
     }
+    // Verify the existing frame buffer pool can hold the escalated frame size.
+    // Reallocating frameBufferMem in-place would invalidate any surface still
+    // held by the renderer, so abort escalation before deleting the decoder.
+    if (dm.maxFrameBufferSize > 0 && frameBuffers[0].size < static_cast<size_t>(dm.maxFrameBufferSize)) {
+        vdDiagPrint("[video] escalateDecoderForOversize: frameBufferMem too small for escalated size");
+        return false;
+    }
     if (decoder && api.DeleteDecoder) {
         api.DeleteDecoder(decoder);
         decoder = nullptr;
@@ -1305,6 +1314,12 @@ void* VideoDecoder::decoderWorker(void* arg) {
             }
             impl->clearRetainedAus();
             impl->clearPipelineBuffers();
+            memset(&frameBuffer, 0, sizeof(frameBuffer));
+            frameBuffer.thisSize = sizeof(frameBuffer);
+            frameBuffer.frameBuffer = impl->frameBuffers[bufIndex].address;
+            frameBuffer.frameBufferSize = impl->frameBuffers[bufIndex].size;
+            memset(&outputInfo, 0, sizeof(outputInfo));
+            outputInfo.thisSize = sizeof(outputInfo);
             rc = impl->api.Decode(impl->decoder, &inputData, &frameBuffer, &outputInfo);
         }
 
@@ -1329,8 +1344,25 @@ void* VideoDecoder::decoderWorker(void* arg) {
                     }
                     impl->clearRetainedAus();
                     impl->clearPipelineBuffers();
+                    memset(&frameBuffer, 0, sizeof(frameBuffer));
+                    frameBuffer.thisSize = sizeof(frameBuffer);
+                    frameBuffer.frameBuffer = impl->frameBuffers[bufIndex].address;
+                    frameBuffer.frameBufferSize = impl->frameBuffers[bufIndex].size;
+                    memset(&outputInfo, 0, sizeof(outputInfo));
+                    outputInfo.thisSize = sizeof(outputInfo);
                     rc = impl->api.Decode(impl->decoder, &inputData, &frameBuffer, &outputInfo);
                 }
+            } else if (impl->decoder == nullptr) {
+                // Escalation deleted the decoder and failed to recreate it;
+                // stop cleanly rather than dereferencing a null decoder handle.
+                impl->releaseFrameBuffer(bufIndex);
+                impl->state = VideoDecoderState::Failed;
+                VideoDecoderUpdate update;
+                update.type = VideoDecoderUpdateType::Failed;
+                update.result = VideoDecoderResultCategory::DecoderInitializationFailure;
+                update.nativeError = rc;
+                impl->pushUpdate(update);
+                break;
             }
         }
 
@@ -1347,7 +1379,6 @@ void* VideoDecoder::decoderWorker(void* arg) {
         // unit.data is moved (no byte copy); the decoder no longer needs the
         // pointer after sceVideodec2Decode() returns.
         impl->retireExpiredAus(submitSeq);
-        impl->retireStalePipelineBuffers(submitSeq);
         impl->retainAu(std::move(unit.data), submitSeq, unit.frameNumber);
 
         // Signal that all CPU-side command-buffer submissions are complete.
@@ -1386,6 +1417,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
 
         if (rc != 0) {
             impl->releaseFrameBuffer(bufIndex);
+            impl->retireStalePipelineBuffers(submitSeq);
             impl->decodeErrors.fetch_add(1);
 
             // --- One-time first decode-error log (stream-issue diagnosis) ---
@@ -1466,6 +1498,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
         if (!outputInfo.isValid || outBufIndex < 0) {
             // No valid output for this AU yet (still in the frame-parallel
             // pipeline). If accepted, bufIndex remains leased in-pipeline.
+            impl->retireStalePipelineBuffers(submitSeq);
             continue;
         }
 
@@ -1478,6 +1511,7 @@ void* VideoDecoder::decoderWorker(void* arg) {
                 ? impl->frameBuffers[outBufIndex].pipelinePtsUs
                 : unit.presentationTimeUs;
         impl->frameBuffers[outBufIndex].inDecoderPipeline = false;
+        impl->retireStalePipelineBuffers(submitSeq);
 
         if (outputInfo.isErrorFrame) {
             // The output frame has error concealment applied. Do NOT discard it:
@@ -1936,7 +1970,10 @@ void VideoDecoder::stop() {
     }
 
     VideoDecoderState cur = m_impl->state.load();
-    if (cur == VideoDecoderState::Idle || cur == VideoDecoderState::Failed) {
+    if (cur == VideoDecoderState::Idle &&
+        !m_impl->threadCreated &&
+        m_impl->decoder == nullptr &&
+        m_impl->frameBufferMem.baseAddress == nullptr) {
         return;
     }
 
@@ -2041,8 +2078,26 @@ bool VideoDecoder::pushEncodedUnit(EncodedVideoUnit&& unit) {
 
     pthread_mutex_lock(&m_impl->inputMutex);
     if (m_impl->inputQueue.size() >= kInputQueueCapacity) {
-        // Queue full — drop the oldest unit (low-latency policy).
-        m_impl->inputQueue.pop_front();
+        if (unit.frameType == 1 /* FRAME_TYPE_IDR */) {
+            // Incoming IDR resets the reference chain: drop queued P-frames so
+            // the keyframe and its SPS/PPS are always preserved.
+            for (auto it = m_impl->inputQueue.begin(); it != m_impl->inputQueue.end();) {
+                if (it->frameType != 1) {
+                    it = m_impl->inputQueue.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (m_impl->inputQueue.size() >= kInputQueueCapacity) {
+                m_impl->inputQueue.pop_front();
+            }
+        } else {
+            // Queue full on a P-frame: reject rather than silently evicting an
+            // earlier IDR or reference frame while reporting DR_OK. Returning
+            // false causes StreamSessionManager to return DR_NEED_IDR.
+            pthread_mutex_unlock(&m_impl->inputMutex);
+            return false;
+        }
     }
     m_impl->inputQueue.push_back(std::move(unit));
     pthread_mutex_unlock(&m_impl->inputMutex);
@@ -2113,12 +2168,15 @@ void VideoDecoder::shutdown() {
         return;
     }
 
-    // Stop the decoder session if active.
+    // Stop the decoder session if active or holding failed-session resources.
     VideoDecoderState cur = m_impl->state.load();
     if (cur == VideoDecoderState::Starting ||
         cur == VideoDecoderState::Running ||
         cur == VideoDecoderState::Stopping ||
-        cur == VideoDecoderState::WaitingForIdr) {
+        cur == VideoDecoderState::WaitingForIdr ||
+        cur == VideoDecoderState::Failed ||
+        m_impl->threadCreated ||
+        m_impl->decoder != nullptr) {
         stop();
     }
 

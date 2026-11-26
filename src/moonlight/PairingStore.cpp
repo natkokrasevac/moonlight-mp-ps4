@@ -493,22 +493,10 @@ bool generateClientIdentity(ClientIdentity& out) {
         ret = mbedtls_x509write_crt_set_serial(&crt, &serial);
         if (ret != 0) break;
 
-        // Validity: now .. now + 10 years.
-        char notBefore[16];
-        char notAfter[16];
-        time_t now = time(nullptr);
-        if (now == static_cast<time_t>(-1)) break;
-        struct tm tmNow;
-        struct tm tmAfter;
-        struct tm* tmp = gmtime(&now);
-        if (!tmp) break;
-        tmNow = *tmp;
-        tmAfter = tmNow;
-        tmAfter.tm_year += 10;
-        if (strftime(notBefore, sizeof(notBefore), "%Y%m%d%H%M%S", &tmNow) == 0) break;
-        if (strftime(notAfter, sizeof(notAfter), "%Y%m%d%H%M%S", &tmAfter) == 0) break;
-
-        ret = mbedtls_x509write_crt_set_validity(&crt, notBefore, notAfter);
+        // Validity: use a wide fixed window (2000..2050) so PS4 RTC clock skew
+        // (common on jailbroken consoles without NTP) never produces an already-
+        // expired or not-yet-valid client certificate.
+        ret = mbedtls_x509write_crt_set_validity(&crt, "20000101000000", "20500101000000");
         if (ret != 0) break;
 
         // Write key DER.

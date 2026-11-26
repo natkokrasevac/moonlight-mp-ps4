@@ -83,11 +83,13 @@ target_compile_options(moonlight-common-c PRIVATE -Wno-error)
 # our replacement source.
 set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/moonlight-common-c/src/PlatformSockets.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/moonlight-common-c/src/VideoDepacketizer.c
     TARGET_DIRECTORY moonlight-common-c
     PROPERTIES HEADER_FILE_ONLY ON
 )
 target_sources(moonlight-common-c PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/_slipstream/PlatformSockets.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/_slipstream/VideoDepacketizer.c
 )
 
 # Replace enet's unix.c with a project-owned PS4 implementation that uses the

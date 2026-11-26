@@ -743,6 +743,11 @@ void* StreamSessionManager::lifecycleWorker(void* arg) {
     drCallbacks.stop = ssmVideoStop;
     drCallbacks.cleanup = ssmVideoCleanup;
     drCallbacks.submitDecodeUnit = ssmVideoSubmitDecodeUnit;
+    // Keep hardware-decoder RFI disabled (0): ProsperoSunshine 0.6.8 notes that
+    // PS5 Avcap2's SetInvalidFrame leaves lost POCs in the HEVC RPS, causing
+    // hardware decoders without FFmpeg's AV_CODEC_FLAG_OUTPUT_CORRUPT to reject
+    // post-invalidation frames, and PC hosts also benefit from clean IDR
+    // recovery + maxNumReferenceFrames=1 on PS4 Videodec2.
     drCallbacks.capabilities = 0;
 
     AUDIO_RENDERER_CALLBACKS arCallbacks;
@@ -1087,6 +1092,10 @@ StreamSessionResult StreamSessionManager::start(StreamSessionDescriptor&& sessio
     }
 
     // --- Create the lifecycle worker ----------------------------------------
+    if (m_impl->threadCreated) {
+        pthread_join(m_impl->workerThread, nullptr);
+        m_impl->threadCreated = false;
+    }
     int rc = pthread_create(&m_impl->workerThread, nullptr,
                             lifecycleWorker, m_impl);
     if (rc != 0) {

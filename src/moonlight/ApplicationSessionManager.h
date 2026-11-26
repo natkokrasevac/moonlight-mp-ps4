@@ -103,7 +103,7 @@ struct StreamConfiguration {
     int height = 1080;             ///< Video height (pixels).
     int fps = 60;                  ///< Video frame rate.
     int bitrate = 50000;           ///< Video bitrate (kbps).
-    int packetSize = 1024;         ///< Max video packet size (bytes).
+    int packetSize = 1392;         ///< Max video packet size (1392 LAN; STREAM_CFG_AUTO caps remote to 1024).
     /// Selected video codec: VIDEO_FORMAT_H264 (0x0001) or VIDEO_FORMAT_H265
     /// (0x0100). Set by MoonlightApp from the Codec setting + isPro().
     int videoFormat = 0x0001;
@@ -111,7 +111,7 @@ struct StreamConfiguration {
     /// selected codec bit (and H.264 as a baseline).
     int videoFormatMask = 0x0001;  ///< VIDEO_FORMAT_H264 (H.264 only).
     int audioConfiguration = 0x000302CA;  ///< AUDIO_CONFIGURATION_STEREO.
-    int streamingMode = 0;         ///< STREAM_CFG_LOCAL (LAN streaming).
+    int streamingMode = 2;         ///< STREAM_CFG_AUTO (1392 LAN vs 1024 paced WAN/Tailscale).
     int encryptionFlags = 0xFFFFFFFF;   ///< ENCFLG_ALL.
     int clientRefreshRateX100 = 6000;   ///< 60 Hz display refresh.
     int colorSpace = 1;            ///< COLORSPACE_REC_709.

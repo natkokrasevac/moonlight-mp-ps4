@@ -512,7 +512,9 @@ UpdateStatus UpdateManager::status() const {
     // Reap worker thread if it has finished
     if (m_impl->workerRunning) {
         UpdateStatus s = m_impl->status.load(std::memory_order_acquire);
-        if (s != UpdateStatus::Checking && s != UpdateStatus::Downloading) {
+        if (s != UpdateStatus::Checking &&
+            s != UpdateStatus::Downloading &&
+            s != UpdateStatus::Installing) {
             pthread_join(m_impl->workerThread, nullptr);
             m_impl->workerThread = 0;
             m_impl->workerRunning = false;

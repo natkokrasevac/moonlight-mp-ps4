@@ -128,6 +128,7 @@ struct ServerInfoUpdate {
     uint32_t generation = 0;   ///< Request generation (for stale-result handling).
     ServerInfoResult result;
     bool valid;          ///< True if `info` is populated.
+    bool authenticatedTls = false; ///< True if queried with mTLS (PairStatus is authoritative).
     ServerInfo info;
 };
 
