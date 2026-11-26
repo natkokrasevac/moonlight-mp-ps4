@@ -1,3 +1,11 @@
+V3.30 - 2026-11-26
+	Serialize mTLS certificate loading across threads in HttpClient and use fixed 2000-2050 X.509 certificate validity to avoid PS4 clock-skew failures
+	Keep pairing error messages visible on screen, display host XML rejection reasons (e.g. ProsperoSunshine WAN pairing disabled), send /unpair on failed handshakes, and keep unpaired manual hosts selectable
+	Prevent stale plain-HTTP serverinfo responses from falsely unpairing newly paired hosts, raise probe and /launch timeouts, and reset stream reconnect state on connect
+	Switch stream configuration to STREAM_CFG_AUTO (1392-byte LAN packets / 1024-byte paced WAN & Tailscale packets) for full ProsperoSunshine 0.6.8 compatibility
+	Accept SPS/VPS-prefixed non-IDR keyframes in PS4 VideoDepacketizer override, expand VideoDecoder input queue to 32 frames with IDR protection and DR_NEED_IDR signaling, and fix Videodec2 NEW_SEQUENCE retry, OVERSIZE_DECODE escalation, and Failed-state cleanup
+	Prevent UI stalls during background PKG installation and join completed worker threads before respawn
+
 V3.20 - 2026-11-10
 	Add automatic update check against GitHub Releases on startup with one-click download and installation
 	Add manual "Check for Updates" action in Settings under the CLIENT section
