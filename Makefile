@@ -22,7 +22,7 @@ endif
 # File naming
 PKG_NAME := $(PROJECT_NAME)_$(VERSION)
 
-SRCS        := $(shell find $(SRC_DIR) \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \))
+SRCS        := $(shell find $(SRC_DIR) third_party/_slipstream \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \))
 
 # Package contents (full paths for dependencies)
 ASSETS_FULL   := $(shell find $(PKG_DIR)/assets -type f -not -name '.gitkeep' -not -name '.DS_Store')

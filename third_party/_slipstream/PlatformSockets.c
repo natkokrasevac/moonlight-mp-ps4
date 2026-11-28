@@ -550,6 +550,39 @@ static int resolveNumericHost(const char* host, int family, struct sockaddr_stor
     return -1;
 }
 
+static int resolveHostNameViaSceNet(const char* host, struct sockaddr_storage* addr, SOCKADDR_LEN* addrLen) {
+    int32_t memid = sceNetPoolCreate("ml-dns", 16 * 1024, 0);
+    if (memid < 0) {
+        Limelog("sceNetPoolCreate for DNS failed: 0x%08x\n", (unsigned int)memid);
+        return memid;
+    }
+
+    OrbisNetId rid = sceNetResolverCreate("ml-dns", memid, 0);
+    if (rid < 0) {
+        Limelog("sceNetResolverCreate failed: 0x%08x\n", (unsigned int)rid);
+        sceNetPoolDestroy(memid);
+        return rid;
+    }
+
+    OrbisNetInAddr resolved;
+    memset(&resolved, 0, sizeof(resolved));
+    int32_t rc = sceNetResolverStartNtoa(rid, host, &resolved, 0, 0, 0);
+    sceNetResolverDestroy(rid);
+    sceNetPoolDestroy(memid);
+
+    if (rc < 0) {
+        Limelog("sceNetResolverStartNtoa(%s) failed: 0x%08x\n", host, (unsigned int)rc);
+        return rc;
+    }
+
+    memset(addr, 0, sizeof(*addr));
+    struct sockaddr_in* sin = (struct sockaddr_in*)addr;
+    sin->sin_family = AF_INET;
+    sin->sin_addr.s_addr = resolved.s_addr;
+    *addrLen = sizeof(*sin);
+    return 0;
+}
+
 int resolveHostName(const char* host, int family, int tcpTestPort, struct sockaddr_storage* addr, SOCKADDR_LEN* addrLen)
 {
     struct addrinfo hints;
@@ -563,6 +596,23 @@ int resolveHostName(const char* host, int family, int tcpTestPort, struct sockad
 
     if (resolveNumericHost(host, family, addr, addrLen) == 0) {
         return 0;
+    }
+
+    // OpenOrbis libc getaddrinfo() cannot resolve DNS names on PS4 (no
+    // /etc/resolv.conf). Use the native sceNetResolver API first for IPv4.
+    if (family == AF_INET || family == AF_UNSPEC) {
+        if (resolveHostNameViaSceNet(host, addr, addrLen) == 0) {
+            if ((tcpTestPort & TCP_PORT_FLAG_ALWAYS_TEST) != 0) {
+                SOCKET testSocket = connectTcpSocket(addr, *addrLen,
+                                                     (unsigned short)(tcpTestPort & TCP_PORT_MASK),
+                                                     TEST_PORT_TIMEOUT_SEC);
+                if (testSocket == INVALID_SOCKET) {
+                    return LastSocketFail();
+                }
+                closeSocket(testSocket);
+            }
+            return 0;
+        }
     }
 
     memset(&hints, 0, sizeof(hints));

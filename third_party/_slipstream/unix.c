@@ -173,6 +173,33 @@ int enet_address_set_host(ENetAddress* address, const char* name)
         return 0;
     }
 
+    // OpenOrbis libc getaddrinfo() cannot resolve DNS names on PS4.
+    // Use the native sceNetResolver API first.
+    {
+        int32_t memid = sceNetPoolCreate("enet-dns", 16 * 1024, 0);
+        if (memid >= 0) {
+            OrbisNetId rid = sceNetResolverCreate("enet-dns", memid, 0);
+            if (rid >= 0) {
+                OrbisNetInAddr resolved;
+                memset(&resolved, 0, sizeof(resolved));
+                int32_t rc = sceNetResolverStartNtoa(rid, name, &resolved, 0, 0, 0);
+                sceNetResolverDestroy(rid);
+                sceNetPoolDestroy(memid);
+                if (rc == 0) {
+                    struct sockaddr_in sin;
+                    memset(&sin, 0, sizeof(sin));
+                    sin.sin_family = AF_INET;
+                    sin.sin_addr.s_addr = resolved.s_addr;
+                    oo_make_enet_address(&sin, address);
+                    errno = 0;
+                    return 0;
+                }
+            } else {
+                sceNetPoolDestroy(memid);
+            }
+        }
+    }
+
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
