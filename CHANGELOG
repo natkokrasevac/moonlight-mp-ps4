@@ -1,3 +1,9 @@
+V3.41 - 2026-11-28
+	Share MoonlightApp's initialized HttpClient with UpdateManager instead of initializing a duplicate libSceHttp/libSceSsl context
+	Fix GitHub Releases asset JSON parser to handle nested objects (e.g. uploader) when locating PKG download URLs and sizes
+	Fix HTTP 302 redirect Host header handling during PKG downloads by letting libSceHttp manage Host per redirect hop
+	Wire update modals (Available, Progress, Result) into HostList, HostGrid, AppList, and AppGrid rendering and dirty-rect tracking
+
 V3.40 - 2026-11-28
 	Resolve hostnames (DDNS / domain names) during stream connection using PS4's native sceNetResolverStartNtoa API in PlatformSockets and ENet instead of OpenOrbis libc getaddrinfo
 	Match upstream single-address TCP test-port behavior in resolveHostName (only probe when TCP_PORT_FLAG_ALWAYS_TEST is set)
