@@ -1,3 +1,8 @@
+V3.40 - 2026-11-28
+	Resolve hostnames (DDNS / domain names) during stream connection using PS4's native sceNetResolverStartNtoa API in PlatformSockets and ENet instead of OpenOrbis libc getaddrinfo
+	Match upstream single-address TCP test-port behavior in resolveHostName (only probe when TCP_PORT_FLAG_ALWAYS_TEST is set)
+	Include third_party/_slipstream sources in Makefile dependency tracking
+
 V3.30 - 2026-11-26
 	Serialize mTLS certificate loading across threads in HttpClient and use fixed 2000-2050 X.509 certificate validity to avoid PS4 clock-skew failures
 	Keep pairing error messages visible on screen, display host XML rejection reasons (e.g. ProsperoSunshine WAN pairing disabled), send /unpair on failed handshakes, and keep unpaired manual hosts selectable

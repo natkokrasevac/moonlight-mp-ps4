@@ -173,7 +173,7 @@ constexpr const char* kAppName = "Moonlight MP for PlayStation 4";
 /// Version label (Settings footer). Used by the Settings panel footer.
 constexpr const char* kVersionLabel = "github.com/natkokrasevac";
 /// Version number (Settings footer). Used by the Settings panel footer.
-constexpr const char* kVersionNumber = "3.30";
+constexpr const char* kVersionNumber = "3.40";
 
 // --- Stream statistics row labels ------------------------------------------
 /// Resolution (statistics row label). Used by the StreamStatistics overlay.
