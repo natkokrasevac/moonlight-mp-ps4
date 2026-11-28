@@ -1,3 +1,8 @@
+V3.42 - 2026-11-28
+	Raise libSceHttp response header limit to 32 KiB and expand HTTP/SSL pools to handle GitHub's large 302 redirect headers
+	Implement manual multi-hop HTTP redirect following (301/302/303/307/308) in HttpClient::performDownload for cross-host GitHub CDN downloads
+	Probe /data/pkg/ writability via fopen() instead of access() so downloaded update PKGs stage directly in /data/pkg/ for GoldHEN Package Installer
+
 V3.41 - 2026-11-28
 	Share MoonlightApp's initialized HttpClient with UpdateManager instead of initializing a duplicate libSceHttp/libSceSsl context
 	Fix GitHub Releases asset JSON parser to handle nested objects (e.g. uploader) when locating PKG download URLs and sizes
