@@ -905,7 +905,7 @@ AppResult MoonlightApp::initialize() {
 
     // 15.5. Initialize the UpdateManager and trigger an asynchronous check for updates.
     if (m_updateManager) {
-        if (m_updateManager->initialize()) {
+        if (m_updateManager->initialize(m_httpClient.get())) {
             diagPrint("[app] UpdateManager initialized; starting background check");
             m_updateManager->checkForUpdatesAsync();
         } else {
@@ -1168,6 +1168,11 @@ void MoonlightApp::shutdown() {
     m_artworkGeneration = 0;
     m_artworkServerId.clear();
 
+    // UpdateManager uses the shared HttpClient, so shut it down first.
+    if (m_updateManager) {
+        m_updateManager->shutdown();
+    }
+
     // HttpClient is shut down before NetworkManager (no HTTP/SSL handles may
     // survive Net termination).
     if (m_httpClient) {
@@ -1196,10 +1201,6 @@ void MoonlightApp::shutdown() {
     // saved when the Settings overlay closes, so no save is needed here.
     if (m_settingsManager) {
         m_settingsManager->shutdown();
-    }
-
-    if (m_updateManager) {
-        m_updateManager->shutdown();
     }
 
     // Then UI/graphics teardown.
@@ -2209,7 +2210,8 @@ void MoonlightApp::render() {
                     hostListDirtyRects(m_prevHostListState, state, dirty, 1) > 0;
 
                 const bool settingsOpen = m_ui->isSettingsOpen();
-                const bool deleteOpen = m_ui->isDeleteConfirmOpen();
+                const bool deleteOpen = m_ui->isDeleteConfirmOpen() ||
+                                        m_ui->isUpdateModalOpen();
                 const bool addHostOpen = m_ui->isAddHostOpen() ||
                                          m_ui->isAddHostStatusOpen();
                 const bool overlayOpen = settingsOpen || deleteOpen || addHostOpen;
@@ -2347,7 +2349,8 @@ void MoonlightApp::render() {
                     hostGridDirtyRects(m_prevHostGridState, state, dirty, 1) > 0;
 
                 const bool settingsOpen = m_ui->isSettingsOpen();
-                const bool deleteOpen = m_ui->isDeleteConfirmOpen();
+                const bool deleteOpen = m_ui->isDeleteConfirmOpen() ||
+                                        m_ui->isUpdateModalOpen();
                 const bool addHostOpen = m_ui->isAddHostOpen() ||
                                          m_ui->isAddHostStatusOpen();
                 const bool overlayOpen = settingsOpen || deleteOpen || addHostOpen;
@@ -2508,7 +2511,8 @@ void MoonlightApp::render() {
                     appListDirtyRects(m_prevAppListState, state, dirty, 1) > 0;
 
                 const bool settingsOpen = m_ui->isSettingsOpen();
-                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen();
+                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen() ||
+                                         m_ui->isUpdateModalOpen();
                 const bool overlayOpen = settingsOpen || quitAppOpen;
 
                 // --- Detect overlay changes -------------------------------
@@ -2619,7 +2623,8 @@ void MoonlightApp::render() {
                     appGridDirtyRects(m_prevAppGridState, state, dirty, 1) > 0;
 
                 const bool settingsOpen = m_ui->isSettingsOpen();
-                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen();
+                const bool quitAppOpen = m_ui->isQuitAppConfirmOpen() ||
+                                         m_ui->isUpdateModalOpen();
                 const bool overlayOpen = settingsOpen || quitAppOpen;
 
                 // --- Detect overlay changes -------------------------------
@@ -3628,6 +3633,9 @@ void MoonlightApp::handleUiIntent(const ui::UiIntent& intent) {
     case ui::UiIntentType::CheckForUpdates:
         diagPrint("[app] intent: CheckForUpdates");
         m_manualUpdateCheck = true;
+        if (m_ui) {
+            m_ui->showUpdateProgressModal("Checking GitHub Releases...", 0.0f, "Checking for updates...");
+        }
         if (m_updateManager) {
             m_updateManager->checkForUpdatesAsync();
         }
@@ -6181,7 +6189,10 @@ void MoonlightApp::updateAutoUpdate() {
     switch (st) {
     case ml::UpdateStatus::UpdateAvailable: {
         if (!m_updatePrompted || m_manualUpdateCheck) {
-            if (m_ui->currentScreen() == ui::UiScreen::HostList &&
+            const bool screenAllowed =
+                m_ui->currentScreen() == ui::UiScreen::HostList ||
+                (m_manualUpdateCheck && m_ui->currentScreen() == ui::UiScreen::AppList);
+            if (screenAllowed &&
                 !m_ui->isDeleteConfirmOpen() &&
                 !m_ui->isResetConfirmOpen() &&
                 !m_ui->isSettingsOpen() &&
@@ -6754,6 +6765,17 @@ int MoonlightApp::modalDirtyRects(const ui::ModalRenderState& prev,
     // the whole screen). This is a rare event; a full-screen update is
     // acceptable.
     if (prevOpen != curOpen) {
+        addRect(m_modalRenderer->dimBounds());
+        return count;
+    }
+
+    // --- Modal kind / content / progress change -----------------------------
+    if (prev.kind != cur.kind ||
+        prev.title != cur.title ||
+        prev.message != cur.message ||
+        prev.message2 != cur.message2 ||
+        prev.progressText != cur.progressText ||
+        prev.progress != cur.progress) {
         addRect(m_modalRenderer->dimBounds());
         return count;
     }

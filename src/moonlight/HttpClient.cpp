@@ -500,7 +500,7 @@ HttpResult HttpClient::perform(const HttpRequest& request,
     // --- Add additional headers --------------------------------------------
     for (const auto& h : request.headers) {
         sceHttpAddRequestHeader(reqId, h.name.c_str(), h.value.c_str(),
-                                kHttpHeaderAdd);
+                                kHttpHeaderOverwrite);
     }
 
     // --- Execute request (blocking path) ------------------------------------
@@ -666,7 +666,6 @@ bool HttpClient::parseUrl(const std::string& url, HttpRequest& outRequest) {
     outRequest.method = HttpMethod::Get;
     outRequest.address = host;
     outRequest.port = port;
-    outRequest.hostHeader = host;
     outRequest.target = path;
     outRequest.useTls = useTls;
     outRequest.tls.trustMode = HttpTlsTrustMode::Unverified;
@@ -779,7 +778,7 @@ HttpResult HttpClient::performDownload(const HttpRequest& request,
 
     for (const auto& h : request.headers) {
         sceHttpAddRequestHeader(reqId, h.name.c_str(), h.value.c_str(),
-                                kHttpHeaderAdd);
+                                kHttpHeaderOverwrite);
     }
 
     if (cancellation != nullptr && cancellation->cancelled()) {

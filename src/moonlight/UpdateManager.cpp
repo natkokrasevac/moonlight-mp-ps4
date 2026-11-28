@@ -142,6 +142,39 @@ bool findJsonNumberField(const std::string& json, const std::string& key, uint64
     return false;
 }
 
+size_t findMatchingDelimiter(const std::string& json, size_t openPos, char openCh, char closeCh) {
+    if (openPos >= json.size() || json[openPos] != openCh) {
+        return std::string::npos;
+    }
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (size_t i = openPos; i < json.size(); ++i) {
+        char c = json[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            inString = true;
+        } else if (c == openCh) {
+            ++depth;
+        } else if (c == closeCh) {
+            --depth;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+    return std::string::npos;
+}
+
 bool parseReleaseJson(const std::string& json, UpdateInfo& outInfo) {
     if (!findJsonStringField(json, "tag_name", outInfo.tagName)) {
         return false;
@@ -155,17 +188,21 @@ bool parseReleaseJson(const std::string& json, UpdateInfo& outInfo) {
     }
 
     size_t openBracket = json.find('[', assetsPos);
-    size_t closeBracket = json.find(']', assetsPos);
-    if (openBracket == std::string::npos || closeBracket == std::string::npos || closeBracket <= openBracket) {
+    if (openBracket == std::string::npos) {
+        return false;
+    }
+    size_t closeBracket = findMatchingDelimiter(json, openBracket, '[', ']');
+    if (closeBracket == std::string::npos || closeBracket <= openBracket) {
         return false;
     }
 
-    // Iterate asset objects inside [ ... ]
+    // Iterate top-level asset objects inside [ ... ], respecting nested objects
+    // such as "uploader": { ... } that precede "size" and "browser_download_url".
     size_t cursor = openBracket + 1;
     while (cursor < closeBracket) {
         size_t objStart = json.find('{', cursor);
         if (objStart == std::string::npos || objStart >= closeBracket) break;
-        size_t objEnd = json.find('}', objStart);
+        size_t objEnd = findMatchingDelimiter(json, objStart, '{', '}');
         if (objEnd == std::string::npos || objEnd > closeBracket) break;
 
         std::string assetObj = json.substr(objStart, objEnd - objStart + 1);
@@ -246,7 +283,7 @@ bool tryInstallPkgNative(const std::string& pkgPath) {
 
 struct UpdateManager::Impl {
     bool initialized = false;
-    HttpClient httpClient;
+    HttpClient* httpClient = nullptr;   ///< Shared non-owning HttpClient from MoonlightApp.
     HttpCancellationToken cancellationToken;
 
     std::atomic<UpdateStatus> status{UpdateStatus::Idle};
@@ -286,7 +323,7 @@ struct UpdateManager::Impl {
         req.ioTimeoutMs = 12000;
 
         HttpResponse res;
-        HttpResult result = self->httpClient.perform(req, res, &self->cancellationToken);
+        HttpResult result = self->httpClient->perform(req, res, &self->cancellationToken);
 
         if (self->cancellationToken.cancelled()) {
             diagPrint("[update] check cancelled");
@@ -375,10 +412,10 @@ struct UpdateManager::Impl {
         req.ioTimeoutMs = 30000;
 
         HttpResponse res;
-        HttpResult result = self->httpClient.performDownload(req, localPath, res,
-                                                            downloadProgressCallback,
-                                                            self,
-                                                            &self->cancellationToken);
+        HttpResult result = self->httpClient->performDownload(req, localPath, res,
+                                                              downloadProgressCallback,
+                                                              self,
+                                                              &self->cancellationToken);
 
         if (self->cancellationToken.cancelled()) {
             diagPrint("[update] download was cancelled");
@@ -425,17 +462,14 @@ UpdateManager::~UpdateManager() {
     m_impl = nullptr;
 }
 
-bool UpdateManager::initialize() {
-    if (!m_impl || m_impl->initialized) {
+bool UpdateManager::initialize(HttpClient* httpClient) {
+    if (!m_impl || m_impl->initialized || !httpClient || !httpClient->isInitialized()) {
+        diagPrint("[update] failed to initialize: invalid or uninitialized HttpClient");
         return false;
     }
-    HttpResult res = m_impl->httpClient.initialize();
-    if (!res.succeeded()) {
-        diagPrint("[update] failed to initialize HttpClient");
-        return false;
-    }
+    m_impl->httpClient = httpClient;
     m_impl->initialized = true;
-    diagPrint("[update] UpdateManager initialized");
+    diagPrint("[update] UpdateManager initialized (shared HttpClient)");
     return true;
 }
 
@@ -449,7 +483,7 @@ void UpdateManager::shutdown() {
         m_impl->workerThread = 0;
         m_impl->workerRunning = false;
     }
-    m_impl->httpClient.shutdown();
+    m_impl->httpClient = nullptr;
     m_impl->initialized = false;
     diagPrint("[update] UpdateManager shut down");
 }
@@ -463,7 +497,15 @@ void UpdateManager::checkForUpdatesAsync() {
         return;
     }
     if (m_impl->workerRunning) {
-        return;
+        UpdateStatus s = m_impl->status.load(std::memory_order_acquire);
+        if (s == UpdateStatus::Checking ||
+            s == UpdateStatus::Downloading ||
+            s == UpdateStatus::Installing) {
+            return;
+        }
+        pthread_join(m_impl->workerThread, nullptr);
+        m_impl->workerThread = 0;
+        m_impl->workerRunning = false;
     }
 
     m_impl->cancellationToken.reset();

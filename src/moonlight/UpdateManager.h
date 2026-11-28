@@ -33,6 +33,8 @@
 
 namespace ml {
 
+class HttpClient;
+
 // ---------------------------------------------------------------------------
 // Update Status
 // ---------------------------------------------------------------------------
@@ -80,8 +82,8 @@ public:
     UpdateManager(UpdateManager&&) = delete;
     UpdateManager& operator=(UpdateManager&&) = delete;
 
-    /// Initialize the update manager and its underlying HTTP client.
-    bool initialize();
+    /// Initialize the update manager using the shared HTTP client.
+    bool initialize(HttpClient* httpClient);
 
     /// Terminate active background operations and release resources.
     void shutdown();
