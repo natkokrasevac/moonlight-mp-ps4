@@ -97,6 +97,59 @@ static void httpHttpsUnloadCert(int32_t httpId) {
     fn(httpId);
 }
 
+/// sceHttpSetResponseHeaderMaxSize(int32_t id, size_t size) — header declares void().
+static int32_t httpSetResponseHeaderMaxSize(int32_t id, size_t size) {
+    typedef int32_t (*SetRespHeaderMaxSizeFn)(int32_t, size_t);
+    static SetRespHeaderMaxSizeFn fn = reinterpret_cast<SetRespHeaderMaxSizeFn>(
+        reinterpret_cast<void*>(&sceHttpSetResponseHeaderMaxSize));
+    return fn(id, size);
+}
+
+/// sceHttpSetAutoRedirect(int32_t id, int32_t isEnable) — header declares void().
+static int32_t httpSetAutoRedirect(int32_t id, int32_t isEnable) {
+    typedef int32_t (*SetAutoRedirectFn)(int32_t, int32_t);
+    static SetAutoRedirectFn fn = reinterpret_cast<SetAutoRedirectFn>(
+        reinterpret_cast<void*>(&sceHttpSetAutoRedirect));
+    return fn(id, isEnable);
+}
+
+/// Extract the Location header value from a raw HTTP response header block.
+static std::string extractLocationHeader(const char* headers, size_t len) {
+    if (!headers || len == 0) return {};
+    std::string raw(headers, len);
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t lineEnd = raw.find('\n', pos);
+        if (lineEnd == std::string::npos) lineEnd = raw.size();
+        std::string line = raw.substr(pos, lineEnd - pos);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        // Case-insensitive prefix check for "location:"
+        if (line.size() > 9) {
+            bool match = true;
+            const char* kPrefix = "location:";
+            for (size_t i = 0; i < 9; ++i) {
+                char c = line[i];
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+                if (c != kPrefix[i]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                size_t valStart = 9;
+                while (valStart < line.size() && (line[valStart] == ' ' || line[valStart] == '\t')) {
+                    ++valStart;
+                }
+                return line.substr(valStart);
+            }
+        }
+        pos = (lineEnd < raw.size()) ? (lineEnd + 1) : raw.size();
+    }
+    return {};
+}
+
 /// Abort callback invoked from another thread when a request is cancelled.
 /// `ctx` points to the active request id (int). sceHttpAbortRequest() interrupts
 /// a blocking sceHttpSendRequest()/sceHttpReadData() so the worker returns
@@ -147,12 +200,11 @@ namespace {
 /// Net pool size for libSceHttp (single active request).
 constexpr int kNetPoolSize = 16 * 1024;
 
-/// SSL pool size. SDK recommends 256 KiB minimum for 3 concurrent connections;
-/// 304 KiB covers 1 connection plus client cert/key loading.
-constexpr size_t kSslPoolSize = 304 * 1024;
+/// SSL pool size. Covers concurrent TLS connections (host probes + GitHub).
+constexpr size_t kSslPoolSize = 512 * 1024;
 
-/// HTTP pool size for libSceHttp (single active request).
-constexpr size_t kHttpPoolSize = 48 * 1024;
+/// HTTP pool size for libSceHttp (supports large GitHub response headers).
+constexpr size_t kHttpPoolSize = 128 * 1024;
 
 /// User-Agent string.
 constexpr const char* kUserAgent = "MoonlightPS4/1.00";
@@ -173,8 +225,10 @@ constexpr size_t kReadChunkSize = 4096;
 // SCE HttpClient logic can be preserved.
 constexpr int kHttpHeaderOverwrite = 1;   ///< SCE_HTTP_HEADER_OVERWRITE
 constexpr int kHttpHeaderAdd       = 2;   ///< SCE_HTTP_HEADER_ADD
-constexpr uint32_t kHttpsFlagCnCheck      = 0x00000001;  ///< SCE_HTTPS_FLAG_CN_CHECK
-constexpr uint32_t kHttpsFlagKnownCaCheck = 0x00000002;  ///< SCE_HTTPS_FLAG_KNOWN_CA_CHECK
+constexpr uint32_t kHttpsFlagCnCheck        = 0x00000001;  ///< SCE_HTTPS_FLAG_CN_CHECK
+constexpr uint32_t kHttpsFlagKnownCaCheck   = 0x00000002;  ///< SCE_HTTPS_FLAG_KNOWN_CA_CHECK
+constexpr uint32_t kHttpsFlagNotAfterCheck  = 0x00000004;  ///< SCE_HTTPS_FLAG_NOT_AFTER_CHECK
+constexpr uint32_t kHttpsFlagNotBeforeCheck = 0x00000008;  ///< SCE_HTTPS_FLAG_NOT_BEFORE_CHECK
 
 } // namespace
 
@@ -401,12 +455,20 @@ HttpResult HttpClient::perform(const HttpRequest& request,
         goto cleanup;
     }
 
+    // Allow large response headers (GitHub API & 302 CSP exceed PS4's 5 KiB default).
+    httpSetResponseHeaderMaxSize(tmplId, 32 * 1024);
+
     // --- Configure HTTPS on the template if needed --------------------------
     // The OpenOrbis SDK supports sceHttpsSetSslCallback with an accept-all
     // callback (the peer identity is established via pairing, not the public
     // PKI). Peer-certificate pinning via sceSslGetPem is not available in this
     // SDK version.
     if (request.useTls) {
+        sceHttpsDisableOption(tmplId,
+                              kHttpsFlagCnCheck |
+                              kHttpsFlagKnownCaCheck |
+                              kHttpsFlagNotAfterCheck |
+                              kHttpsFlagNotBeforeCheck);
         rc = sceHttpsSetSslCallback(tmplId, sslVerifyCallback, nullptr);
         if (rc < 0) {
             httpDiagPrint("[http] sceHttpsSetSslCallback(template) failed");
@@ -719,97 +781,164 @@ HttpResult HttpClient::performDownload(const HttpRequest& request,
 
     HttpResult result;
 
-    tmplId = sceHttpCreateTemplate(m_impl->httpCtxId, kUserAgent,
-                                   ORBIS_HTTP_VERSION_1_1, 1);
-    if (tmplId < 0) {
-        httpDiagPrint("[http] sceHttpCreateTemplate failed");
-        return HttpResult(HttpResultCategory::HttpInitializationFailure,
-                          static_cast<uint32_t>(tmplId));
-    }
-
-    if (request.useTls) {
-        rc = sceHttpsSetSslCallback(tmplId, sslVerifyCallback, nullptr);
-        if (rc < 0) {
-            httpDiagPrint("[http] sceHttpsSetSslCallback(template) failed");
-            sceHttpDeleteTemplate(tmplId);
-            return HttpResult(HttpResultCategory::SdkFailure,
-                              static_cast<uint32_t>(rc));
+    // Follow up to 5 HTTP redirects manually so cross-host HTTPS redirects
+    // (e.g. github.com -> release-assets.githubusercontent.com) with large
+    // response headers (~6 KiB CSP + 900B Location) work reliably on PS4.
+    HttpRequest currentReq = request;
+    constexpr int kMaxRedirects = 5;
+    for (int hop = 0; hop <= kMaxRedirects; ++hop) {
+        if (cancellation != nullptr && cancellation->cancelled()) {
+            result = HttpResult(HttpResultCategory::Cancelled);
+            goto cleanup;
         }
+
+        tmplId = sceHttpCreateTemplate(m_impl->httpCtxId, kUserAgent,
+                                       ORBIS_HTTP_VERSION_1_1, 1);
+        if (tmplId < 0) {
+            httpDiagPrint("[http] sceHttpCreateTemplate failed");
+            result = HttpResult(HttpResultCategory::HttpInitializationFailure,
+                                static_cast<uint32_t>(tmplId));
+            goto cleanup;
+        }
+
+        httpSetResponseHeaderMaxSize(tmplId, 32 * 1024);
+        httpSetAutoRedirect(tmplId, 0);
+
+        if (currentReq.useTls) {
+            sceHttpsDisableOption(tmplId,
+                                  kHttpsFlagCnCheck |
+                                  kHttpsFlagKnownCaCheck |
+                                  kHttpsFlagNotAfterCheck |
+                                  kHttpsFlagNotBeforeCheck);
+            rc = sceHttpsSetSslCallback(tmplId, sslVerifyCallback, nullptr);
+            if (rc < 0) {
+                httpDiagPrint("[http] sceHttpsSetSslCallback(template) failed");
+                result = HttpResult(HttpResultCategory::SdkFailure,
+                                    static_cast<uint32_t>(rc));
+                goto cleanup;
+            }
+        }
+
+        const char* scheme = currentReq.useTls ? "https" : "http";
+        char urlBuf[kMaxTargetLen + 128];
+        if ((currentReq.useTls && currentReq.port == 443) ||
+            (!currentReq.useTls && currentReq.port == 80)) {
+            snprintf(urlBuf, sizeof(urlBuf), "%s://%s%s",
+                     scheme, currentReq.address.c_str(),
+                     currentReq.target.c_str());
+        } else {
+            snprintf(urlBuf, sizeof(urlBuf), "%s://%s:%u%s",
+                     scheme, currentReq.address.c_str(),
+                     static_cast<unsigned>(currentReq.port),
+                     currentReq.target.c_str());
+        }
+
+        connId = sceHttpCreateConnectionWithURL(tmplId, urlBuf, 1);
+        if (connId < 0) {
+            httpDiagPrint("[http] sceHttpCreateConnectionWithURL failed");
+            result = HttpResult(HttpResultCategory::ConnectionFailure,
+                                static_cast<uint32_t>(connId));
+            goto cleanup;
+        }
+
+        reqId = sceHttpCreateRequestWithURL(connId, ORBIS_METHOD_GET, urlBuf, 0);
+        if (reqId < 0) {
+            httpDiagPrint("[http] sceHttpCreateRequestWithURL failed");
+            result = HttpResult(HttpResultCategory::SdkFailure,
+                                static_cast<uint32_t>(reqId));
+            goto cleanup;
+        }
+
+        sceHttpSetConnectTimeOut(reqId, currentReq.connectTimeoutMs * 1000);
+        sceHttpSetSendTimeOut(reqId, currentReq.ioTimeoutMs * 1000);
+        httpSetRecvTimeOut(reqId, currentReq.ioTimeoutMs * 1000);
+
+        if (currentReq.useTls) {
+            sceHttpsDisableOption(reqId,
+                                  kHttpsFlagCnCheck |
+                                  kHttpsFlagKnownCaCheck |
+                                  kHttpsFlagNotAfterCheck |
+                                  kHttpsFlagNotBeforeCheck);
+        }
+
+        if (!currentReq.hostHeader.empty()) {
+            sceHttpAddRequestHeader(reqId, "Host", currentReq.hostHeader.c_str(),
+                                    kHttpHeaderOverwrite);
+        }
+
+        for (const auto& h : currentReq.headers) {
+            sceHttpAddRequestHeader(reqId, h.name.c_str(), h.value.c_str(),
+                                    kHttpHeaderOverwrite);
+        }
+
+        if (cancellation != nullptr && cancellation->cancelled()) {
+            result = HttpResult(HttpResultCategory::Cancelled);
+            goto cleanup;
+        }
+
+        if (cancellation != nullptr) {
+            cancellation->setAbort(httpAbortRequest, &reqId);
+        }
+
+        rc = sceHttpSendRequest(reqId, nullptr, 0);
+        if (rc < 0) {
+            char dbg[256];
+            snprintf(dbg, sizeof(dbg),
+                     "[http] sceHttpSendRequest failed (rc=0x%08X urlLen=%zu hop=%d)",
+                     static_cast<uint32_t>(rc), strlen(urlBuf), hop);
+            httpDiagPrint(dbg);
+            result = HttpResult(HttpResultCategory::SendFailure,
+                                static_cast<uint32_t>(rc));
+            goto cleanup;
+        }
+
+        rc = sceHttpGetStatusCode(reqId, &statusCode);
+        if (rc < 0) {
+            httpDiagPrint("[http] sceHttpGetStatusCode failed");
+            result = HttpResult(HttpResultCategory::MalformedResponse,
+                                static_cast<uint32_t>(rc));
+            goto cleanup;
+        }
+        response.statusCode = statusCode;
+
+        if (statusCode == 301 || statusCode == 302 || statusCode == 303 ||
+            statusCode == 307 || statusCode == 308) {
+            char* rawHeaders = nullptr;
+            size_t rawHeaderSize = 0;
+            std::string location;
+            if (sceHttpGetAllResponseHeaders(reqId, &rawHeaders, &rawHeaderSize) >= 0 &&
+                rawHeaders != nullptr && rawHeaderSize > 0) {
+                location = extractLocationHeader(rawHeaders, rawHeaderSize);
+            }
+
+            if (cancellation != nullptr) {
+                cancellation->clearAbort();
+            }
+            sceHttpDeleteRequest(reqId);   reqId = -1;
+            sceHttpDeleteConnection(connId); connId = -1;
+            sceHttpDeleteTemplate(tmplId); tmplId = -1;
+
+            if (location.empty() || hop == kMaxRedirects) {
+                httpDiagPrint("[http] redirect failed: missing Location or max hops exceeded");
+                result = HttpResult(HttpResultCategory::MalformedResponse);
+                goto cleanup;
+            }
+
+            HttpRequest nextReq;
+            if (!HttpClient::parseUrl(location, nextReq)) {
+                httpDiagPrint("[http] redirect failed: could not parse Location URL");
+                result = HttpResult(HttpResultCategory::MalformedResponse);
+                goto cleanup;
+            }
+            nextReq.connectTimeoutMs = currentReq.connectTimeoutMs;
+            nextReq.ioTimeoutMs = currentReq.ioTimeoutMs;
+            nextReq.headers.push_back({"User-Agent", "Moonlight-PS4-Updater"});
+            currentReq = std::move(nextReq);
+            continue;
+        }
+
+        break;
     }
-
-    const char* scheme = request.useTls ? "https" : "http";
-    char urlBuf[kMaxTargetLen + 64];
-    snprintf(urlBuf, sizeof(urlBuf), "%s://%s:%u%s",
-             scheme, request.address.c_str(),
-             static_cast<unsigned>(request.port),
-             request.target.c_str());
-
-    connId = sceHttpCreateConnectionWithURL(tmplId, urlBuf, 1);
-    if (connId < 0) {
-        httpDiagPrint("[http] sceHttpCreateConnectionWithURL failed");
-        sceHttpDeleteTemplate(tmplId);
-        return HttpResult(HttpResultCategory::ConnectionFailure,
-                          static_cast<uint32_t>(connId));
-    }
-
-    reqId = sceHttpCreateRequestWithURL(connId, ORBIS_METHOD_GET, urlBuf, 0);
-    if (reqId < 0) {
-        httpDiagPrint("[http] sceHttpCreateRequestWithURL failed");
-        sceHttpDeleteConnection(connId);
-        sceHttpDeleteTemplate(tmplId);
-        return HttpResult(HttpResultCategory::SdkFailure,
-                          static_cast<uint32_t>(reqId));
-    }
-
-    sceHttpSetConnectTimeOut(reqId, request.connectTimeoutMs * 1000);
-    sceHttpSetSendTimeOut(reqId, request.ioTimeoutMs * 1000);
-    httpSetRecvTimeOut(reqId, request.ioTimeoutMs * 1000);
-
-    if (request.useTls) {
-        sceHttpsDisableOption(reqId,
-                              kHttpsFlagCnCheck |
-                              kHttpsFlagKnownCaCheck);
-    }
-
-    if (!request.hostHeader.empty()) {
-        sceHttpAddRequestHeader(reqId, "Host", request.hostHeader.c_str(),
-                                kHttpHeaderOverwrite);
-    }
-
-    for (const auto& h : request.headers) {
-        sceHttpAddRequestHeader(reqId, h.name.c_str(), h.value.c_str(),
-                                kHttpHeaderOverwrite);
-    }
-
-    if (cancellation != nullptr && cancellation->cancelled()) {
-        result = HttpResult(HttpResultCategory::Cancelled);
-        goto cleanup;
-    }
-
-    if (cancellation != nullptr) {
-        cancellation->setAbort(httpAbortRequest, &reqId);
-    }
-
-    rc = sceHttpSendRequest(reqId, nullptr, 0);
-    if (rc < 0) {
-        char dbg[256];
-        snprintf(dbg, sizeof(dbg),
-                 "[http] sceHttpSendRequest failed (rc=0x%08X urlLen=%zu)",
-                 static_cast<uint32_t>(rc), strlen(urlBuf));
-        httpDiagPrint(dbg);
-        result = HttpResult(HttpResultCategory::SendFailure,
-                            static_cast<uint32_t>(rc));
-        goto cleanup;
-    }
-
-    rc = sceHttpGetStatusCode(reqId, &statusCode);
-    if (rc < 0) {
-        httpDiagPrint("[http] sceHttpGetStatusCode failed");
-        result = HttpResult(HttpResultCategory::MalformedResponse,
-                            static_cast<uint32_t>(rc));
-        goto cleanup;
-    }
-    response.statusCode = statusCode;
 
     if (statusCode < 200 || statusCode >= 300) {
         char dbg[128];

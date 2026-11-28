@@ -46,6 +46,11 @@ constexpr const char* kPkgDirFallback = "/data/moonlight-mp";
 void diagPrint(const char* msg) {
     printf("%s\n", msg);
     fflush(stdout);
+    FILE* f = fopen("/data/moonlight-mp/update.log", "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,15 +388,29 @@ struct UpdateManager::Impl {
             return nullptr;
         }
 
-        // Determine destination path: prefer /data/pkg/ (GoldHEN default), fallback to /data/moonlight-mp/
+        // Determine destination path: prefer /data/pkg/ (GoldHEN default), fallback to /data/moonlight-mp/.
+        // Probe writability with fopen() rather than access(), which can fail on PS4/OpenOrbis.
         mkdir("/data", 0777);
         std::string targetDir = kPkgDirGoldHen;
-        if (mkdir(targetDir.c_str(), 0777) != 0 && access(targetDir.c_str(), W_OK) != 0) {
-            targetDir = kPkgDirFallback;
-            mkdir(targetDir.c_str(), 0777);
+        mkdir(targetDir.c_str(), 0777);
+        {
+            std::string probePath = targetDir + "/.write_test";
+            FILE* probe = fopen(probePath.c_str(), "wb");
+            if (probe) {
+                fclose(probe);
+                remove(probePath.c_str());
+            } else {
+                targetDir = kPkgDirFallback;
+                mkdir(targetDir.c_str(), 0777);
+            }
         }
 
         std::string localPath = targetDir + "/" + info.pkgName;
+        {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "[update] downloading to %s", localPath.c_str());
+            diagPrint(buf);
+        }
         pthread_mutex_lock(&self->mutex);
         self->updateInfo.localPkgPath = localPath;
         pthread_mutex_unlock(&self->mutex);
@@ -469,6 +488,9 @@ bool UpdateManager::initialize(HttpClient* httpClient) {
     }
     m_impl->httpClient = httpClient;
     m_impl->initialized = true;
+    if (FILE* f = fopen("/data/moonlight-mp/update.log", "w")) {
+        fclose(f);
+    }
     diagPrint("[update] UpdateManager initialized (shared HttpClient)");
     return true;
 }
